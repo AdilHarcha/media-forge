@@ -14,7 +14,7 @@ docker compose up -d --build
 
 ```bash
 # lancer un workflow sur un fichier
-curl -H "x-api-key: $API_KEY" -F file=@photo.jpg "http://127.0.0.1:3100/jobs?workflow=image-web"
+curl -H "x-api-key: $API_KEY" -F file=@photo.jpg "http://127.0.0.1:3100/jobs?workflow=smart-web"
 # -> {"id":"...","status":"queued"}
 
 # suivre / récupérer le résultat (download_url présigné)
@@ -26,9 +26,33 @@ curl -H "x-api-key: $API_KEY" -H "content-type: application/json" \
   http://127.0.0.1:3100/workflows
 ```
 
-## Étapes disponibles
+## Workflows par règles (v2)
 
-`image.resize` · `image.convert` (webp, avif, jpeg, png) · `video.transcode` (h264, av1, vp9) · `video.thumbnail`
+Le format d'entrée est détecté par signature (pas par extension). La première règle qui correspond s'applique.
+Chaque règle enchaîne : **redimensionner → convertir → compresser**, avec des objectifs.
+
+```json
+{"rules": [
+  {"match": {"formats": ["png"]},  "resize": {"width": 1600},
+   "convert": {"format": "webp"},
+   "compress": {"quality": 82, "minQuality": 60, "maxBytes": 250000}},
+  {"match": {"formats": ["svg"]},  "compress": {"svgo": true}},
+  {"match": {"kind": "video"},     "resize": {"maxHeight": 1080},
+   "convert": {"codec": "h264"},   "compress": {"crf": 26}}
+]}
+```
+
+| Clé | Rôle |
+|---|---|
+| `match.formats` / `match.kind` | png, jpeg, webp, avif, gif, svg, mp4, mov, webm · `image` / `video` (absent = règle par défaut) |
+| `convert.format` / `convert.codec` | format image de sortie (webp, avif, jpeg, png) / codec vidéo (h264, av1, vp9). Absent = on garde le format |
+| `compress.quality` | **qualité visée** (1-100) |
+| `compress.minQuality` | **plancher de qualité** : jamais en dessous |
+| `compress.maxBytes` | **objectif de poids** : la qualité baisse par paliers de 5 jusqu'à l'atteindre (vidéo : débit calculé depuis la durée) |
+
+Convert + compress = **un seul encodage** (pas de double perte). Si l'objectif de poids est inatteignable au plancher
+de qualité, le job réussit quand même avec le meilleur résultat et un avertissement dans `logs`.
+Une définition v1 (simple liste `[{type, params}]`) reste acceptée.
 
 ## Architecture
 
@@ -38,7 +62,8 @@ curl -H "x-api-key: $API_KEY" -H "content-type: application/json" \
 
 ## Roadmap
 
-1. Workflows en DAG (branches parallèles, ex. vidéo + vignette) au lieu de la liste linéaire
-2. Éditeur visuel (React Flow) qui produit la même définition JSON
-3. Accélération matérielle (NVENC/QSV), presets par qualité cible
-4. Webhooks de fin de job, purge automatique des fichiers (rétention)
+1. Objectif de qualité perceptuelle (SSIM/VMAF) en plus du plancher `minQuality`
+2. Workflows en DAG (branches parallèles, ex. vidéo + vignette) au lieu de la liste linéaire
+3. Éditeur visuel (React Flow) qui produit la même définition JSON
+4. Accélération matérielle (NVENC/QSV), presets par qualité cible
+5. Webhooks de fin de job, purge automatique des fichiers (rétention)

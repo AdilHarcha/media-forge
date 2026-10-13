@@ -3,7 +3,7 @@
 CREATE TABLE IF NOT EXISTS workflows (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name        text NOT NULL UNIQUE,
-  -- liste ordonnée d'étapes : [{"type":"image.convert","params":{"format":"webp","quality":80}}, ...]
+  -- v1 : liste d'étapes [{type,params}]   |   v2 : {"rules":[{match,resize,convert,compress}]} (voir src/pipeline.js)
   definition  jsonb NOT NULL,
   created_at  timestamptz NOT NULL DEFAULT now()
 );
@@ -46,6 +46,12 @@ CREATE TRIGGER jobs_notify AFTER INSERT ON jobs
 
 -- workflows d'exemple
 INSERT INTO workflows (name, definition) VALUES
- ('image-web', '[{"type":"image.resize","params":{"width":1600}},{"type":"image.convert","params":{"format":"webp","quality":80}}]'),
+ ('smart-web', '{"rules":[
+    {"match":{"formats":["png"]},          "resize":{"width":1600}, "convert":{"format":"webp"}, "compress":{"quality":82,"minQuality":60,"maxBytes":250000}},
+    {"match":{"formats":["jpeg"]},         "resize":{"width":1600}, "convert":{"format":"webp"}, "compress":{"quality":80,"minQuality":55,"maxBytes":200000}},
+    {"match":{"formats":["svg"]},          "compress":{"svgo":true}},
+    {"match":{"formats":["webp","avif","gif"]}, "convert":{"format":"webp"}, "compress":{"quality":80,"minQuality":50}},
+    {"match":{"kind":"video"},             "resize":{"maxHeight":1080}, "convert":{"codec":"h264"}, "compress":{"crf":26}}
+  ]}'),
  ('video-web', '[{"type":"video.transcode","params":{"codec":"h264","crf":26,"maxHeight":1080}}]')
 ON CONFLICT (name) DO NOTHING;

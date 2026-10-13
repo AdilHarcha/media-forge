@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { extname } from 'node:path';
 import { db, ensureBucket, putStream, presign } from './lib.js';
 import { steps } from './steps/index.js';
+import { validateDefinition } from './pipeline.js';
 
 const app = Fastify({ logger: true });
 await app.register(multipart, { limits: { fileSize: Number(process.env.MAX_UPLOAD_BYTES || 2 * 1024 ** 3) } });
@@ -23,9 +24,8 @@ app.get('/workflows', async () => (await db.query('SELECT id, name, definition F
 
 app.post('/workflows', async (req, reply) => {
   const { name, definition } = req.body ?? {};
-  if (!name || !Array.isArray(definition) || !definition.length) return reply.code(400).send({ error: 'name + definition[] requis' });
-  const unknown = definition.find((s) => !steps[s.type]);
-  if (unknown) return reply.code(400).send({ error: `étape inconnue: ${unknown.type}` });
+  const err = !name ? 'name requis' : validateDefinition(definition);
+  if (err) return reply.code(400).send({ error: err });
   const { rows: [wf] } = await db.query(
     'INSERT INTO workflows (name, definition) VALUES ($1,$2) ON CONFLICT (name) DO UPDATE SET definition = $2 RETURNING *',
     [name, JSON.stringify(definition)]);

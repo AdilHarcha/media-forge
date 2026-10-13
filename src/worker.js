@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { db, ensureBucket, getFile, putFile } from './lib.js';
 import { steps } from './steps/index.js';
+import { detect } from './detect.js';
+import { resolvePlan } from './pipeline.js';
 
 const STALE_AFTER = '15 minutes';
 const log = (jobId, step, message) =>
@@ -30,13 +32,17 @@ async function run(job) {
     let current = join(dir, 'input' + (job.input_key.match(/\.[a-z0-9]+$/i)?.[0] ?? ''));
     await getFile(job.input_key, current);
     let mime;
-    for (let i = 0; i < wf.definition.length; i++) {
-      const { type, params = {} } = wf.definition[i];
+    const detected = await detect(current);
+    const { label, plan } = resolvePlan(wf.definition, detected);
+    await log(job.id, null, `détecté ${detected.format} (${detected.kind}) → ${label}: ${plan.map((s) => s.type).join(' → ')}`);
+    for (let i = 0; i < plan.length; i++) {
+      const { type, params = {} } = plan[i];
       if (!steps[type]) throw new Error(`étape inconnue: ${type}`);
       const t0 = Date.now();
       const stepDir = await mkdtemp(join(dir, `s${i}-`));
-      ({ path: current, mime } = await steps[type](current, params, stepDir));
-      await log(job.id, i, `${type} ok en ${Date.now() - t0} ms`);
+      let info;
+      ({ path: current, mime, info } = await steps[type](current, params, stepDir));
+      await log(job.id, i, `${type} ok en ${Date.now() - t0} ms${info ? ' — ' + info : ''}`);
       await db.query('UPDATE jobs SET step_index = $2, locked_at = now() WHERE id = $1', [job.id, i + 1]);
     }
     const outKey = `output/${job.id}${current.match(/\.[a-z0-9]+$/i)?.[0] ?? ''}`;
