@@ -49,7 +49,8 @@ Chaque règle enchaîne : **redimensionner → convertir → compresser**, avec 
 | `compress.quality` | **qualité visée** (1-100) |
 | `compress.minQuality` | **plancher de qualité** : jamais en dessous |
 | `compress.minSsim` | **qualité mesurée** (image, 0-1) : cherche la qualité encodeur la plus basse dont le SSIM ≥ cible (ex. 0.97) |
-| `compress.minVmaf` / `minSsim` | **qualité mesurée** (vidéo) : cherche le CRF le plus élevé qui respecte la cible, sur un échantillon de 12 s, puis encode tout |
+| `compress.minSsim` (vidéo) | **qualité mesurée** : cherche le CRF le plus élevé qui respecte la cible (ex. 0.97), sur un échantillon de 12 s au milieu, puis encode tout |
+| `compress.minVmaf` (vidéo) | idem en VMAF (0-100). Demande un FFmpeg compilé avec `libvmaf` : absent des paquets Debian, donc refusé avec un message clair par l'image par défaut |
 | `compress.strict` | `true` = le job échoue si un objectif n'est pas atteint (défaut : succès + avertissement dans `logs`) |
 | `compress.maxBytes` | **objectif de poids** : la qualité baisse par paliers de 5 jusqu'à l'atteindre (vidéo : débit calculé depuis la durée) |
 
