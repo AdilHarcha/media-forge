@@ -48,10 +48,14 @@ Chaque règle enchaîne : **redimensionner → convertir → compresser**, avec 
 | `convert.format` / `convert.codec` | format image de sortie (webp, avif, jpeg, png) / codec vidéo (h264, av1, vp9). Absent = on garde le format |
 | `compress.quality` | **qualité visée** (1-100) |
 | `compress.minQuality` | **plancher de qualité** : jamais en dessous |
+| `compress.minSsim` | **qualité mesurée** (image, 0-1) : cherche la qualité encodeur la plus basse dont le SSIM ≥ cible (ex. 0.97) |
+| `compress.minVmaf` / `minSsim` | **qualité mesurée** (vidéo) : cherche le CRF le plus élevé qui respecte la cible, sur un échantillon de 12 s, puis encode tout |
+| `compress.strict` | `true` = le job échoue si un objectif n'est pas atteint (défaut : succès + avertissement dans `logs`) |
 | `compress.maxBytes` | **objectif de poids** : la qualité baisse par paliers de 5 jusqu'à l'atteindre (vidéo : débit calculé depuis la durée) |
 
-Convert + compress = **un seul encodage** (pas de double perte). Si l'objectif de poids est inatteignable au plancher
-de qualité, le job réussit quand même avec le meilleur résultat et un avertissement dans `logs`.
+Convert + compress = **un seul encodage** (pas de double perte). Si `minSsim`/`minVmaf` et `maxBytes` entrent en conflit, **la qualité l'emporte**. Un objectif inatteignable
+garde le meilleur résultat avec un avertissement dans `logs` (ou échoue avec `strict: true`).
+Une interface web est servie sur `/` (upload multiple, suivi des jobs, éditeur de workflows).
 Une définition v1 (simple liste `[{type, params}]`) reste acceptée.
 
 ## Architecture
@@ -62,8 +66,7 @@ Une définition v1 (simple liste `[{type, params}]`) reste acceptée.
 
 ## Roadmap
 
-1. Objectif de qualité perceptuelle (SSIM/VMAF) en plus du plancher `minQuality`
-2. Workflows en DAG (branches parallèles, ex. vidéo + vignette) au lieu de la liste linéaire
-3. Éditeur visuel (React Flow) qui produit la même définition JSON
-4. Accélération matérielle (NVENC/QSV), presets par qualité cible
-5. Webhooks de fin de job, purge automatique des fichiers (rétention)
+1. Workflows en DAG (branches parallèles, ex. vidéo + vignette) au lieu de la liste linéaire
+2. Éditeur visuel (React Flow) qui produit la même définition JSON
+3. Accélération matérielle (NVENC/QSV), presets par qualité cible
+4. Webhooks de fin de job, purge automatique des fichiers (rétention)

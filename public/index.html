@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MediaForge</title>
+<style>
+  :root { --bg:#fff; --fg:#14161a; --muted:#6b7280; --line:#e5e7eb; --card:#f7f8fa; --accent:#2563eb; --ok:#15803d; --err:#b91c1c; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0e1013; --fg:#e8eaed; --muted:#9aa0a6; --line:#2a2e35; --card:#16191e; --accent:#60a5fa; --ok:#4ade80; --err:#f87171; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; } p.sub { color:var(--muted); margin:0 0 24px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  h2 { font-size:15px; margin:0 0 12px; }
+  label { display:block; font-size:13px; color:var(--muted); margin:8px 0 4px; }
+  input, select, textarea, button { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:8px 10px; width:100%; }
+  textarea { font-family: ui-monospace, monospace; font-size:12.5px; min-height:220px; }
+  button { background:var(--accent); color:#fff; border:0; cursor:pointer; width:auto; padding:8px 16px; margin-top:12px; }
+  button.ghost { background:transparent; color:var(--fg); border:1px solid var(--line); }
+  .row { display:grid; grid-template-columns: 1fr 1fr; gap:12px; } @media (max-width:640px){ .row{grid-template-columns:1fr;} }
+  .job { border-top:1px solid var(--line); padding:12px 0; } .job:first-child{border-top:0}
+  .st { font-weight:600; } .done{color:var(--ok)} .failed{color:var(--err)}
+  pre { margin:8px 0 0; white-space:pre-wrap; font-size:12px; color:var(--muted); }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>MediaForge</h1>
+  <p class="sub">Conversion et compression d'images et de vidéos — 100 % auto-hébergé.</p>
+
+  <section>
+    <h2>Connexion</h2>
+    <label for="key">Clé API</label>
+    <input id="key" type="password" autocomplete="off" placeholder="x-api-key">
+  </section>
+
+  <section>
+    <h2>Traiter des fichiers</h2>
+    <div class="row">
+      <div><label for="wf">Workflow</label><select id="wf"></select></div>
+      <div><label for="files">Fichiers (images, SVG, vidéos)</label><input id="files" type="file" multiple></div>
+    </div>
+    <button id="go">Lancer</button>
+    <div id="jobs"></div>
+  </section>
+
+  <section>
+    <h2>Éditer un workflow</h2>
+    <div class="row">
+      <div><label for="wname">Nom</label><input id="wname" placeholder="mon-workflow"></div>
+      <div><label for="wload">Charger l'existant</label><select id="wload"></select></div>
+    </div>
+    <label for="wdef">Définition (JSON : règles v2 ou liste d'étapes)</label>
+    <textarea id="wdef" spellcheck="false"></textarea>
+    <button id="save">Enregistrer</button> <span id="wmsg"></span>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const store = { get(k){ try { return localStorage.getItem(k) || ''; } catch { return ''; } }, set(k,v){ try { localStorage.setItem(k,v); } catch {} } };
+$('key').value = store.get('mf_key');
+$('key').addEventListener('change', () => { store.set('mf_key', $('key').value); load(); });
+const api = (path, opts = {}) => fetch(path, { ...opts, headers: { 'x-api-key': $('key').value, ...(opts.headers || {}) } });
+let workflows = [];
+
+async function load() {
+  const r = await api('/workflows');
+  if (!r.ok) { $('wf').innerHTML = '<option>clé API invalide ?</option>'; return; }
+  workflows = await r.json();
+  const opts = workflows.map((w) => `<option value="${w.name}">${w.name}</option>`).join('');
+  $('wf').innerHTML = opts;
+  $('wload').innerHTML = '<option value="">—</option>' + opts;
+}
+$('wload').addEventListener('change', () => {
+  const w = workflows.find((x) => x.name === $('wload').value);
+  if (w) { $('wname').value = w.name; $('wdef').value = JSON.stringify(w.definition, null, 2); }
+});
+$('save').addEventListener('click', async () => {
+  let definition;
+  try { definition = JSON.parse($('wdef').value); } catch (e) { $('wmsg').textContent = 'JSON invalide : ' + e.message; return; }
+  const r = await api('/workflows', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: $('wname').value.trim(), definition }) });
+  $('wmsg').textContent = r.ok ? 'Enregistré ✔' : 'Erreur : ' + (await r.json()).error;
+  if (r.ok) load();
+});
+
+const fmt = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' Mo' : Math.round(n / 1024) + ' Ko';
+$('go').addEventListener('click', async () => {
+  for (const file of $('files').files) {
+    const el = document.createElement('div'); el.className = 'job';
+    el.innerHTML = `<div><b></b> — <span class="st">envoi…</span></div><pre></pre>`;
+    el.querySelector('b').textContent = `${file.name} (${fmt(file.size)})`;
+    $('jobs').prepend(el);
+    const fd = new FormData(); fd.append('file', file);
+    const r = await api('/jobs?workflow=' + encodeURIComponent($('wf').value), { method: 'POST', body: fd });
+    if (!r.ok) { el.querySelector('.st').textContent = 'refusé : ' + (await r.json()).error; continue; }
+    poll((await r.json()).id, el, file.size);
+  }
+});
+
+async function poll(id, el, inSize) {
+  const st = el.querySelector('.st');
+  const j = await (await api('/jobs/' + id)).json();
+  st.textContent = j.status; st.className = 'st ' + j.status;
+  el.querySelector('pre').textContent = j.logs.map((l) => l.message).join('\n') + (j.error ? '\nERREUR : ' + j.error : '');
+  if (j.status === 'done') {
+    st.insertAdjacentHTML('afterend', ` — <a href="${j.download_url}" download>télécharger</a>`);
+  } else if (j.status !== 'failed') setTimeout(() => poll(id, el, inSize), 1500);
+}
+load();
+</script>
+</body>
+</html>

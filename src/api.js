@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import multipart from '@fastify/multipart';
 import { randomUUID } from 'node:crypto';
 import { extname } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { db, ensureBucket, putStream, presign } from './lib.js';
 import { steps } from './steps/index.js';
 import { validateDefinition } from './pipeline.js';
@@ -11,12 +12,14 @@ await app.register(multipart, { limits: { fileSize: Number(process.env.MAX_UPLOA
 
 // Auth minimale par clé API (à remplacer par ton SSO / Authelia si besoin)
 app.addHook('onRequest', async (req, reply) => {
-  if (req.url === '/health') return;
+  if (req.url === '/health' || req.url === '/') return;
   if (process.env.API_KEY && req.headers['x-api-key'] !== process.env.API_KEY) {
     return reply.code(401).send({ error: 'clé API invalide' });
   }
 });
 
+const page = await readFile(new URL('../public/index.html', import.meta.url));
+app.get('/', async (_req, reply) => reply.type('text/html; charset=utf-8').send(page));
 app.get('/health', async () => ({ ok: true }));
 app.get('/steps', async () => Object.keys(steps));
 

@@ -8,8 +8,8 @@ import { steps } from './steps/index.js';
  * match    : { formats?: ["png","jpeg"], kind?: "image"|"video" }  (absent = règle par défaut)
  * resize   : { width?, height?, maxHeight? }
  * convert  : { format: "webp" | "avif" | "jpeg" | "png" | "mp4"... }   (image) / { codec: "h264"|"av1"|"vp9" } (vidéo)
- * compress : { quality, minQuality, maxBytes }                        (image)
- *            { crf, maxBytes, preset }                                (vidéo)
+ * compress : { quality, minQuality, minSsim, maxBytes, strict }         (image) minSsim ∈ ]0,1] : qualité MESURÉE minimale
+ *            { crf, minVmaf | minSsim, maxBytes, preset, strict }     (vidéo) minVmaf ∈ ]0,100]
  *            { svgo: true }                                           (svg → svg)
  *
  * Le moteur exécute convert+compress en UN SEUL encodage (deux passes lossy dégraderaient deux fois le fichier).
@@ -26,6 +26,8 @@ export function validateDefinition(def) {
     const c = r.compress ?? {};
     if (c.quality != null && (c.quality < 1 || c.quality > 100)) return `règle ${i}: quality doit être 1-100`;
     if (c.minQuality != null && c.quality != null && c.minQuality > c.quality) return `règle ${i}: minQuality > quality`;
+    if (c.minSsim != null && !(c.minSsim > 0 && c.minSsim <= 1)) return `règle ${i}: minSsim doit être dans ]0,1]`;
+    if (c.minVmaf != null && !(c.minVmaf > 0 && c.minVmaf <= 100)) return `règle ${i}: minVmaf doit être dans ]0,100]`;
     if (c.maxBytes != null && !(c.maxBytes > 0)) return `règle ${i}: maxBytes invalide`;
     if (r.convert?.format && !['webp', 'avif', 'jpeg', 'png'].includes(r.convert.format)) return `règle ${i}: format de sortie image inconnu`;
   }
