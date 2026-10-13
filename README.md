@@ -2,6 +2,7 @@
 
 Workflows souverains de conversion et compression d'images et de vidéos.
 100 % auto-hébergé : **PostgreSQL** (état + file d'attente), **Garage** (stockage S3, Deuxfleurs), **FFmpeg** + **sharp/libvips** (traitement).
+Aucune API cloud, aucune dépendance payante.
 
 ## Démarrer
 
@@ -10,35 +11,44 @@ Workflows souverains de conversion et compression d'images et de vidéos.
 docker compose up -d --build && ./scripts/init-storage.sh   # init-storage : layout + clé + bucket (idempotent)
 ```
 
+L'API écoute sur `127.0.0.1:3100` ; l'interface web est servie sur `/`. Pour l'exposer, placer un reverse proxy TLS devant
+(exemple nginx : upload en flux `proxy_request_buffering off`, `client_max_body_size`, limites de débit).
+
+Variables utiles (`.env`) : `API_KEY` · `PUBLIC_URL` (URL publique, utilisée dans les webhooks) · `RETENTION_DAYS` (défaut 7, `0` = jamais)
+· `MAX_UPLOAD_BYTES` (défaut 2 Go) · `GRAPH_PARALLEL` (branches d'un job en parallèle, défaut 2) · `ALLOW_PRIVATE_WEBHOOKS=1` (tests uniquement).
+
 ## Utilisation
 
 ```bash
-# lancer un workflow sur un fichier
-curl -H "x-api-key: $API_KEY" -F file=@photo.jpg "http://127.0.0.1:3100/jobs?workflow=smart-web"
+# lancer un workflow sur un fichier (+ webhook optionnel)
+curl -H "x-api-key: $API_KEY" -F file=@photo.jpg "http://127.0.0.1:3100/jobs?workflow=smart-web&webhook=https://mon-site.fr/hook"
 # -> {"id":"...","status":"queued"}
 
-# suivre / récupérer le résultat (download_url présigné)
+# suivre / récupérer les résultats (une URL signée par sortie)
 curl -H "x-api-key: $API_KEY" http://127.0.0.1:3100/jobs/<id>
 
-# créer son propre workflow
+# créer / modifier un workflow
 curl -H "x-api-key: $API_KEY" -H "content-type: application/json" \
   -d '{"name":"video-av1","definition":[{"type":"video.transcode","params":{"codec":"av1","crf":32}}]}' \
   http://127.0.0.1:3100/workflows
 ```
 
+Routes : `GET /` (UI) · `GET|POST /workflows` · `DELETE /workflows/:name` · `POST /jobs` · `GET /jobs` · `GET /jobs/:id` · `GET /steps` · `GET /dl/:id` (lien signé).
+
 ## Workflows par règles (v2)
 
 Le format d'entrée est détecté par signature (pas par extension). La première règle qui correspond s'applique.
-Chaque règle enchaîne : **redimensionner → convertir → compresser**, avec des objectifs.
+Chaque règle enchaîne : **redimensionner → convertir → compresser**, avec des objectifs. L'éditeur web génère ce JSON par formulaire.
 
 ```json
 {"rules": [
   {"match": {"formats": ["png"]},  "resize": {"width": 1600},
    "convert": {"format": "webp"},
-   "compress": {"quality": 82, "minQuality": 60, "maxBytes": 250000}},
+   "compress": {"quality": 85, "minQuality": 50, "minSsim": 0.97, "maxBytes": 250000}},
   {"match": {"formats": ["svg"]},  "compress": {"svgo": true}},
   {"match": {"kind": "video"},     "resize": {"maxHeight": 1080},
-   "convert": {"codec": "h264"},   "compress": {"crf": 26}}
+   "convert": {"codec": "h264"},   "compress": {"minSsim": 0.97},
+   "extras": [{"name": "thumb", "type": "video.thumbnail", "params": {"at": 2}}]}
 ]}
 ```
 
@@ -49,25 +59,56 @@ Chaque règle enchaîne : **redimensionner → convertir → compresser**, avec 
 | `compress.quality` | **qualité visée** (1-100) |
 | `compress.minQuality` | **plancher de qualité** : jamais en dessous |
 | `compress.minSsim` | **qualité mesurée** (image, 0-1) : cherche la qualité encodeur la plus basse dont le SSIM ≥ cible (ex. 0.97) |
-| `compress.minSsim` (vidéo) | **qualité mesurée** : cherche le CRF le plus élevé qui respecte la cible (ex. 0.97), sur un échantillon de 12 s au milieu, puis encode tout |
-| `compress.minVmaf` (vidéo) | idem en VMAF (0-100). Demande un FFmpeg compilé avec `libvmaf` : absent des paquets Debian, donc refusé avec un message clair par l'image par défaut |
+| `compress.minSsim` (vidéo) | **qualité mesurée** : cherche le CRF le plus élevé qui respecte la cible, sur un échantillon de 12 s au milieu, puis encode tout |
+| `compress.minVmaf` (vidéo) | idem en VMAF (0-100). Demande un FFmpeg compilé avec `libvmaf` : absent des paquets Debian, refusé avec un message clair par l'image par défaut |
 | `compress.strict` | `true` = le job échoue si un objectif n'est pas atteint (défaut : succès + avertissement dans `logs`) |
-| `compress.maxBytes` | **objectif de poids** : la qualité baisse par paliers de 5 jusqu'à l'atteindre (vidéo : débit calculé depuis la durée) |
+| `compress.maxBytes` | **objectif de poids** : la qualité baisse par paliers de 5 jusqu'à l'atteindre (vidéo sans cible qualité : débit calculé depuis la durée) |
+| `extras` | sorties **parallèles** tirées de la source (vignette vidéo, miniature image…) : `{name, type, params}` |
 
-Convert + compress = **un seul encodage** (pas de double perte). Si `minSsim`/`minVmaf` et `maxBytes` entrent en conflit, **la qualité l'emporte**. Un objectif inatteignable
-garde le meilleur résultat avec un avertissement dans `logs` (ou échoue avec `strict: true`).
-Une interface web est servie sur `/` (upload multiple, suivi des jobs, éditeur de workflows).
-Une définition v1 (simple liste `[{type, params}]`) reste acceptée.
+Convert + compress = **un seul encodage** (pas de double perte). Si `minSsim`/`minVmaf` et `maxBytes` entrent en conflit, **la qualité l'emporte**.
+
+## Graphes (DAG)
+
+Pour des chaînes ou des branches libres, une définition peut être un graphe (au niveau racine, ou dans une règle via `"graph"`) :
+
+```json
+{"graph": {"nodes": [
+  {"id": "main",  "type": "image.convert", "params": {"format": "webp", "width": 1200, "quality": 80}, "output": true},
+  {"id": "thumb", "from": "main", "type": "image.convert", "params": {"format": "webp", "width": 200}, "output": true}
+]}}
+```
+
+`from` = `"input"` (défaut) ou l'`id` d'un autre nœud. Les nœuds sans dépendance entre eux s'exécutent en parallèle (`GRAPH_PARALLEL`).
+Seuls les nœuds `"output": true` sont livrés ; **si aucun nœud n'est marqué, toutes les feuilles du graphe le sont**.
+Le nom d'une sortie est l'`id` du nœud (`main` = sortie principale). Cycles, ids dupliqués et sources inconnues sont refusés à l'enregistrement.
+
+Étapes disponibles : `image.convert` · `image.resize` · `svg.optimize` · `video.transcode` · `video.thumbnail`.
+
+## Webhooks
+
+`POST /jobs?webhook=https://…` : à la fin **définitive** du job (`done` ou `failed` après 3 tentatives), l'API envoie un POST JSON
+`{id, status, error, outputs:[{name, mime, size, url}]}` avec l'en-tête `x-forge-signature: sha256=<HMAC>` (HMAC-SHA256 du corps, clé = `DL_SECRET` ou `API_KEY`).
+3 essais (0 s, 2 s, 10 s). Les URLs de sortie sont valables 24 h. Les adresses privées/loopback/lien-local sont refusées (anti-SSRF), redirections non suivies.
+
+## Rétention
+
+Les fichiers (source + sorties) des jobs terminés depuis plus de `RETENTION_DAYS` jours sont supprimés du stockage (toutes les 10 min, par lots de 100).
+La ligne du job reste (historique, logs). Un job `running` abandonné (worker disparu, tentatives épuisées) est clos en échec.
 
 ## Architecture
 
 - La file est la table `jobs` ; les workers réservent avec `FOR UPDATE SKIP LOCKED` et sont réveillés par `LISTEN/NOTIFY`.
 - Un job abandonné (worker crashé) est repris après 15 min ; 3 tentatives max.
+- Le schéma évolue par migrations (`db/migrations/*.sql`), appliquées automatiquement au démarrage sous verrou.
 - Scalabilité : lancer d'autres workers (même image, `node src/worker.js`) sur d'autres machines, pointant sur le même Postgres + Garage.
 
-## Roadmap
+## Limites connues
 
-1. Workflows en DAG (branches parallèles, ex. vidéo + vignette) au lieu de la liste linéaire
-2. Éditeur visuel (React Flow) qui produit la même définition JSON
-3. Accélération matérielle (NVENC/QSV), presets par qualité cible
-4. Webhooks de fin de job, purge automatique des fichiers (rétention)
+- **Accélération matérielle (NVENC / QSV / VAAPI)** : non implémentée. Elle n'a pas pu être testée (serveur de référence sans GPU).
+  Piste : un worker dédié sur une machine GPU, avec un FFmpeg adapté, branché sur le même Postgres + Garage.
+- **VMAF** : nécessite un FFmpeg avec `libvmaf` (SSIM utilisé par défaut).
+- **Éditeur visuel** : formulaire de règles (pas de canevas à nœuds) ; les graphes s'éditent en JSON.
+
+## Licence
+
+AGPL-3.0-or-later.
