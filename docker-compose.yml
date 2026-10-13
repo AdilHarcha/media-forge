@@ -56,9 +56,9 @@ services:
     <<: *app
     command: ["node", "src/worker.js"]
     # Limites strictes : le transcodage ne doit jamais saturer l'hôte
-    cpus: 2
+    cpus: ${WORKER_CPUS:-2}
     cpu_shares: 256     # priorité basse face aux autres services de l'hôte
-    mem_limit: 2g
+    mem_limit: ${WORKER_MEM:-2g}
     pids_limit: 512
     deploy:
       replicas: 1   # augmenter / ajouter des nodes : tous piochent dans la même file Postgres

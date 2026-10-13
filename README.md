@@ -14,8 +14,8 @@ docker compose up -d --build && ./scripts/init-storage.sh   # init-storage : lay
 L'API écoute sur `127.0.0.1:3100` ; l'interface web est servie sur `/`. Pour l'exposer, placer un reverse proxy TLS devant
 (exemple nginx : upload en flux `proxy_request_buffering off`, `client_max_body_size`, limites de débit).
 
-Variables utiles (`.env`) : `API_KEY` · `PUBLIC_URL` (URL publique, utilisée dans les webhooks) · `RETENTION_DAYS` (défaut 7, `0` = jamais)
-· `MAX_UPLOAD_BYTES` (défaut 2 Go) · `GRAPH_PARALLEL` (branches d'un job en parallèle, défaut 2) · `ALLOW_PRIVATE_WEBHOOKS=1` (tests uniquement).
+Variables utiles (`.env`) : `API_KEY` (+ `API_KEYS` : une clé par application, révocable seule ; `DL_SECRET` fixe la signature des liens) · `PUBLIC_URL` (URL publique, utilisée dans les webhooks) · `RETENTION_DAYS` (défaut 7, `0` = jamais)
+· `MAX_UPLOAD_BYTES` (défaut 2 Go) · `GRAPH_PARALLEL` (branches d'un job en parallèle, défaut 2) · `WORKER_CONCURRENCY` (jobs simultanés par worker, défaut 1) · `FFMPEG_THREADS` (défaut 2) · `WORKER_CPUS` / `WORKER_MEM` (plafonds du conteneur worker, défaut 2 / 2g) · `ALLOW_PRIVATE_WEBHOOKS=1` (tests uniquement).
 
 ## Utilisation
 
@@ -33,7 +33,20 @@ curl -H "x-api-key: $API_KEY" -H "content-type: application/json" \
   http://127.0.0.1:3100/workflows
 ```
 
-Routes : `GET /` (UI) · `GET|POST /workflows` · `DELETE /workflows/:name` · `POST /jobs` · `GET /jobs` · `GET /jobs/:id` · `GET /steps` · `GET /dl/:id` (lien signé).
+### Client en ligne de commande
+
+```bash
+FORGE_URL=https://forge.exemple.fr FORGE_KEY=… node cli/forge.mjs smart-web photos/*.jpg video.mp4 --out sortie --parallel 4
+```
+
+Envoie les fichiers, attend les jobs et télécharge toutes les sorties (sans dépendance, Node ≥ 20). Pratique en CI / à la publication d'un site.
+
+### Lots (ZIP)
+
+`POST /batches` → `{id}` ; envoyer chaque fichier avec `POST /jobs?workflow=…&batch=<id>` ; `GET /batches/:id` donne l'avancement et, une fois tout fini, `zip_url`
+(ZIP en flux, noms d'origine conservés). L'interface web crée un lot automatiquement quand plusieurs fichiers sont choisis.
+
+Routes : `GET /` (UI) · `GET|POST /workflows` · `DELETE /workflows/:name` · `POST /jobs` · `GET /jobs` · `GET /jobs/:id` · `POST /batches` · `GET /batches/:id` · `GET /steps` · `GET /dl/:id` et `GET /dlz/:id` (liens signés).
 
 ## Workflows par règles (v2)
 
@@ -101,6 +114,27 @@ La ligne du job reste (historique, logs). Un job `running` abandonné (worker di
 - Un job abandonné (worker crashé) est repris après 15 min ; 3 tentatives max.
 - Le schéma évolue par migrations (`db/migrations/*.sql`), appliquées automatiquement au démarrage sous verrou.
 - Scalabilité : lancer d'autres workers (même image, `node src/worker.js`) sur d'autres machines, pointant sur le même Postgres + Garage.
+
+## Exploitation
+
+`deploy/` contient de quoi exploiter un serveur : `install-systemd.sh` (root) installe un export quotidien de la base `deploy/backup-db.sh`
+(7 fichiers tournants dans `backups/`, à inclure dans votre sauvegarde ; les médias ne sont pas sauvegardés : régénérables et purgés)
+et un contrôle de santé `deploy/healthcheck.sh` toutes les 5 min (conteneurs, API, file bloquée > 15 min, rafale d'échecs ; écrit dans `ALERT_LOG`, uniquement quand le diagnostic change).
+
+## Performances mesurées
+
+Serveur partagé 8 cœurs (AMD EPYC), worker plafonné à 2 CPU / 2 Go, un seul job à la fois :
+
+| Cas | Durée | Mémoire (pic) |
+|---|---|---|
+| JPEG 48 Mpx → WebP (SSIM ≥ 0,97) | 3 s | 250 Mo |
+| PNG 24 Mpx → WebP | 6 s | 325 Mo |
+| 30 images 1600×1200 | 58 s (≈ 1,9 s/image) | 320 Mo |
+| Vidéo 4K 30 s → H.264 1080p (SSIM ≥ 0,97) | 174 s | ≈ 1 Go |
+
+La vidéo est limitée par le CPU : la recherche de qualité encode 5 échantillons de 12 s (preset rapide, résultat conservateur) avant l'encodage final.
+`FFMPEG_THREADS` borne les threads de FFmpeg, qui voit sinon tous les cœurs de l'hôte et non le quota du conteneur (mémoire ≈ 1,6 Go → 1 Go sur le test 4K).
+Pour aller plus vite : plus de CPU (`WORKER_CPUS`), plusieurs workers, ou un worker sur une machine dédiée.
 
 ## Limites connues
 
