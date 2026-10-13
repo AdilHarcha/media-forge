@@ -1,13 +1,13 @@
 # MediaForge
 
 Workflows souverains de conversion et compression d'images et de vidéos.
-100 % auto-hébergé : **PostgreSQL** (état + file d'attente), **MinIO** (stockage S3), **FFmpeg** + **sharp/libvips** (traitement).
+100 % auto-hébergé : **PostgreSQL** (état + file d'attente), **Garage** (stockage S3, Deuxfleurs), **FFmpeg** + **sharp/libvips** (traitement).
 
 ## Démarrer
 
 ```bash
-cp .env.example .env   # puis changer les secrets
-docker compose up -d --build
+./scripts/gen-env.sh   # génère .env avec des secrets aléatoires
+docker compose up -d --build && ./scripts/init-storage.sh   # init-storage : layout + clé + bucket (idempotent)
 ```
 
 ## Utilisation
@@ -62,7 +62,7 @@ Une définition v1 (simple liste `[{type, params}]`) reste acceptée.
 
 - La file est la table `jobs` ; les workers réservent avec `FOR UPDATE SKIP LOCKED` et sont réveillés par `LISTEN/NOTIFY`.
 - Un job abandonné (worker crashé) est repris après 15 min ; 3 tentatives max.
-- Scalabilité : lancer d'autres workers (même image, `node src/worker.js`) sur d'autres machines, pointant sur le même Postgres + MinIO.
+- Scalabilité : lancer d'autres workers (même image, `node src/worker.js`) sur d'autres machines, pointant sur le même Postgres + Garage.
 
 ## Roadmap
 

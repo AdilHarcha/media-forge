@@ -14,8 +14,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   workflow_id   uuid NOT NULL REFERENCES workflows(id),
   status        job_status NOT NULL DEFAULT 'queued',
-  input_key     text NOT NULL,            -- clé MinIO du fichier source
-  output_key    text,                     -- clé MinIO du résultat final
+  input_key     text NOT NULL,            -- clé S3 du fichier source
+  output_key    text,                     -- clé S3 du résultat final
   step_index    int  NOT NULL DEFAULT 0,  -- reprise après crash
   attempts      int  NOT NULL DEFAULT 0,
   max_attempts  int  NOT NULL DEFAULT 3,
