@@ -1,12 +1,15 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { db, ensureBucket, getFile, putFile } from './lib.js';
+import { extname, join } from 'node:path';
+import { db, ensureBucket, getFile, putFile, migrate } from './lib.js';
 import { steps } from './steps/index.js';
 import { detect } from './detect.js';
 import { resolvePlan } from './pipeline.js';
+import { purgeExpired } from './purge.js';
+import { deliverWebhook } from './webhook.js';
 
 const STALE_AFTER = '15 minutes';
+const MAX_PARALLEL = Number(process.env.GRAPH_PARALLEL || 2);   // branches d'un même job exécutées en parallèle
 const log = (jobId, step, message) =>
   db.query('INSERT INTO job_logs (job_id, step, message) VALUES ($1,$2,$3)', [jobId, step, message]);
 
@@ -25,46 +28,82 @@ async function claim() {
   return rows[0];
 }
 
+// Exécute le graphe : à chaque tour, tous les nœuds dont la source est prête (par paquets de MAX_PARALLEL).
+async function runGraph(job, nodes, inputPath, dir) {
+  const results = new Map([['input', { path: inputPath }]]);
+  let pending = nodes.slice(), done = 0;
+  while (pending.length) {
+    const ready = pending.filter((n) => results.has(n.from));
+    if (!ready.length) throw new Error('graphe bloqué (cycle ou source manquante)');
+    for (let i = 0; i < ready.length; i += MAX_PARALLEL) {
+      await Promise.all(ready.slice(i, i + MAX_PARALLEL).map(async (n) => {
+        const step = steps[n.type];
+        if (!step) throw new Error(`étape inconnue: ${n.type}`);
+        const t0 = Date.now();
+        const nodeDir = await mkdtemp(join(dir, `${n.id}-`));
+        const r = await step(results.get(n.from).path, n.params, nodeDir);
+        results.set(n.id, r);
+        await log(job.id, null, `[${n.id}] ${n.type} ok en ${Date.now() - t0} ms${r.info ? ' — ' + r.info : ''}`);
+        await db.query('UPDATE jobs SET step_index = $2, locked_at = now() WHERE id = $1', [job.id, ++done]);
+      }));
+    }
+    pending = pending.filter((n) => !results.has(n.id));
+  }
+  return results;
+}
+
 async function run(job) {
   const { rows: [wf] } = await db.query('SELECT definition FROM workflows WHERE id = $1', [job.workflow_id]);
   const dir = await mkdtemp(join(tmpdir(), 'mf-'));
+  let finalStatus;
   try {
-    let current = join(dir, 'input' + (job.input_key.match(/\.[a-z0-9]+$/i)?.[0] ?? ''));
-    await getFile(job.input_key, current);
-    let mime;
-    const detected = await detect(current);
-    const { label, plan } = resolvePlan(wf.definition, detected);
-    await log(job.id, null, `détecté ${detected.format} (${detected.kind}) → ${label}: ${plan.map((s) => s.type).join(' → ')}`);
-    for (let i = 0; i < plan.length; i++) {
-      const { type, params = {} } = plan[i];
-      if (!steps[type]) throw new Error(`étape inconnue: ${type}`);
-      const t0 = Date.now();
-      const stepDir = await mkdtemp(join(dir, `s${i}-`));
-      let info;
-      ({ path: current, mime, info } = await steps[type](current, params, stepDir));
-      await log(job.id, i, `${type} ok en ${Date.now() - t0} ms${info ? ' — ' + info : ''}`);
-      await db.query('UPDATE jobs SET step_index = $2, locked_at = now() WHERE id = $1', [job.id, i + 1]);
+    const input = join(dir, 'input' + (job.input_key.match(/\.[a-z0-9]+$/i)?.[0] ?? ''));
+    await getFile(job.input_key, input);
+    const detected = await detect(input);
+    const { label, nodes } = resolvePlan(wf.definition, detected);
+    await log(job.id, null, `détecté ${detected.format} (${detected.kind}) → ${label}: ${nodes.map((n) => `${n.id}=${n.type}`).join(', ')}`);
+
+    const results = await runGraph(job, nodes, input, dir);
+
+    // un job relancé repart de zéro : on remplace d'éventuelles sorties d'une tentative précédente
+    let mainKey = null;
+    for (const n of nodes.filter((x) => x.output)) {
+      const r = results.get(n.id);
+      const key = `output/${job.id}/${n.id}${extname(r.path)}`;
+      await putFile(key, r.path, r.mime);
+      await db.query(
+        `INSERT INTO job_outputs (job_id, name, key, mime, size) VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (job_id, name) DO UPDATE SET key = $3, mime = $4, size = $5`,
+        [job.id, n.id, key, r.mime, (await stat(r.path)).size]);
+      if (n.id === 'main' || !mainKey) mainKey = key;
     }
-    const outKey = `output/${job.id}${current.match(/\.[a-z0-9]+$/i)?.[0] ?? ''}`;
-    await putFile(outKey, current, mime);
-    await db.query(`UPDATE jobs SET status='done', output_key=$2, finished_at=now(), error=NULL WHERE id=$1`, [job.id, outKey]);
+    await db.query(`UPDATE jobs SET status='done', output_key=$2, finished_at=now(), error=NULL WHERE id=$1`, [job.id, mainKey]);
+    finalStatus = 'done';
   } catch (e) {
     const final = job.attempts >= job.max_attempts;
     await log(job.id, null, `erreur (tentative ${job.attempts}/${job.max_attempts}): ${e.message}`);
     await db.query(
       `UPDATE jobs SET status=$2, error=$3, finished_at=CASE WHEN $2='failed' THEN now() END WHERE id=$1`,
       [job.id, final ? 'failed' : 'queued', e.message]);
+    if (final) finalStatus = 'failed';
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+  // webhook seulement pour un état définitif (pas pour une tentative qui sera rejouée)
+  if (finalStatus) await deliverWebhook(job.id).catch((e) => console.error('webhook:', e.message));
 }
 
 async function loop() {
+  await migrate();
   await ensureBucket();
   const listener = await db.connect();
   let wake = () => {};
   listener.on('notification', () => wake());
   await listener.query('LISTEN new_job');
+
+  purgeExpired();
+  setInterval(purgeExpired, 60 * 60 * 1000).unref();   // purge de rétention toutes les heures
+
   console.log('worker prêt');
   for (;;) {
     const job = await claim();

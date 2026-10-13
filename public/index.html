@@ -9,20 +9,26 @@
   @media (prefers-color-scheme: dark) { :root { --bg:#0e1013; --fg:#e8eaed; --muted:#9aa0a6; --line:#2a2e35; --card:#16191e; --accent:#60a5fa; --ok:#4ade80; --err:#f87171; } }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, sans-serif; }
-  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+  main { max-width: 900px; margin: 0 auto; padding: 24px 16px 64px; }
   h1 { font-size: 22px; margin: 0 0 4px; } p.sub { color:var(--muted); margin:0 0 24px; }
   section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
   h2 { font-size:15px; margin:0 0 12px; }
   label { display:block; font-size:13px; color:var(--muted); margin:8px 0 4px; }
-  input, select, textarea, button { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:8px 10px; width:100%; }
-  textarea { font-family: ui-monospace, monospace; font-size:12.5px; min-height:220px; }
+  input, select, textarea, button { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:7px 10px; width:100%; }
+  input[type=checkbox] { width:auto; margin-right:6px; }
+  textarea { font-family: ui-monospace, monospace; font-size:12.5px; min-height:200px; }
   button { background:var(--accent); color:#fff; border:0; cursor:pointer; width:auto; padding:8px 16px; margin-top:12px; }
-  button.ghost { background:transparent; color:var(--fg); border:1px solid var(--line); }
+  button.ghost { background:transparent; color:var(--fg); border:1px solid var(--line); margin-top:0; padding:5px 10px; font-size:13px; }
   .row { display:grid; grid-template-columns: 1fr 1fr; gap:12px; } @media (max-width:640px){ .row{grid-template-columns:1fr;} }
+  .grid4 { display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; } @media (max-width:640px){ .grid4{grid-template-columns:1fr 1fr;} }
   .job { border-top:1px solid var(--line); padding:12px 0; } .job:first-child{border-top:0}
   .st { font-weight:600; } .done{color:var(--ok)} .failed{color:var(--err)}
   pre { margin:8px 0 0; white-space:pre-wrap; font-size:12px; color:var(--muted); }
   a { color:var(--accent); }
+  .rule { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:10px; }
+  .rule header { display:flex; gap:8px; align-items:center; justify-content:space-between; margin-bottom:6px; font-weight:600; }
+  .chips label { display:inline-flex; align-items:center; margin:2px 10px 2px 0; font-size:13px; color:var(--fg); }
+  .hint { font-size:12px; color:var(--muted); margin-top:4px; }
 </style>
 </head>
 <body>
@@ -42,19 +48,25 @@
       <div><label for="wf">Workflow</label><select id="wf"></select></div>
       <div><label for="files">Fichiers (images, SVG, vidéos)</label><input id="files" type="file" multiple></div>
     </div>
+    <label for="hook">Webhook de fin de job (optionnel, https://…)</label>
+    <input id="hook" placeholder="https://mon-site.fr/hooks/media">
     <button id="go">Lancer</button>
     <div id="jobs"></div>
   </section>
 
   <section>
-    <h2>Éditer un workflow</h2>
+    <h2>Éditeur de workflow</h2>
     <div class="row">
       <div><label for="wname">Nom</label><input id="wname" placeholder="mon-workflow"></div>
       <div><label for="wload">Charger l'existant</label><select id="wload"></select></div>
     </div>
-    <label for="wdef">Définition (JSON : règles v2 ou liste d'étapes)</label>
-    <textarea id="wdef" spellcheck="false"></textarea>
-    <button id="save">Enregistrer</button> <span id="wmsg"></span>
+    <div id="builder"></div>
+    <span id="addrule"><button class="ghost" id="addimg" type="button">+ Règle image</button> <button class="ghost" id="addvid" type="button">+ Règle vidéo</button></span>
+    <details style="margin-top:12px"><summary>JSON (avancé : graphes, listes d'étapes)</summary>
+      <textarea id="wdef" spellcheck="false"></textarea>
+      <div class="hint">Modifier le JSON met à jour le formulaire si la définition est de type « règles ».</div>
+    </details>
+    <button id="save" type="button">Enregistrer</button> <span id="wmsg"></span>
   </section>
 </main>
 <script>
@@ -63,19 +75,99 @@ const store = { get(k){ try { return localStorage.getItem(k) || ''; } catch { re
 $('key').value = store.get('mf_key');
 $('key').addEventListener('change', () => { store.set('mf_key', $('key').value); load(); });
 const api = (path, opts = {}) => fetch(path, { ...opts, headers: { 'x-api-key': $('key').value, ...(opts.headers || {}) } });
+const el = (tag, props = {}, ...kids) => { const e = Object.assign(document.createElement(tag), props); kids.forEach((k) => e.append(k)); return e; };
 let workflows = [];
 
+function fillSelect(sel, names, blank) {
+  sel.replaceChildren(...(blank ? [el('option', { value: '', textContent: '—' })] : []), ...names.map((n) => el('option', { value: n, textContent: n })));
+}
 async function load() {
   const r = await api('/workflows');
-  if (!r.ok) { $('wf').innerHTML = '<option>clé API invalide ?</option>'; return; }
+  if (!r.ok) { fillSelect($('wf'), ['clé API invalide ?']); return; }
   workflows = await r.json();
-  const opts = workflows.map((w) => `<option value="${w.name}">${w.name}</option>`).join('');
-  $('wf').innerHTML = opts;
-  $('wload').innerHTML = '<option value="">—</option>' + opts;
+  const names = workflows.map((w) => w.name);
+  fillSelect($('wf'), names); fillSelect($('wload'), names, true);
 }
+
+/* ───────── Éditeur de règles ───────── */
+const IMG_FORMATS = ['png', 'jpeg', 'webp', 'avif', 'gif', 'svg'];
+let rules = [];
+
+const newRule = (kind = 'image') => kind === 'video'
+  ? { kind, formats: [], maxHeight: 1080, convert: 'h264', quality: '', minQuality: '', minSsim: 0.97, maxKB: '', strict: false, thumb: true, thumbAt: 1 }
+  : { kind, formats: ['png'], width: 1600, convert: 'webp', quality: 85, minQuality: 50, minSsim: 0.97, maxKB: 250, strict: false, thumb: false };
+
+const num = (v) => (v === '' || v == null || isNaN(Number(v)) ? undefined : Number(v));
+const clean = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== false));
+
+function toRule(f) {
+  const isVideo = f.kind === 'video';
+  const r = { match: isVideo ? { kind: 'video' } : f.formats.length ? { formats: f.formats } : { kind: 'image' } };
+  if (isVideo) { if (num(f.maxHeight)) r.resize = { maxHeight: num(f.maxHeight) }; if (f.convert) r.convert = { codec: f.convert }; }
+  else { if (num(f.width)) r.resize = { width: num(f.width) }; if (f.convert) r.convert = { format: f.convert }; }
+  const onlySvg = !isVideo && f.formats.length === 1 && f.formats[0] === 'svg' && !f.convert;
+  r.compress = onlySvg ? { svgo: true } : clean({
+    quality: num(f.quality), minQuality: num(f.minQuality), minSsim: num(f.minSsim),
+    maxBytes: num(f.maxKB) ? Math.round(num(f.maxKB) * 1000) : undefined, strict: f.strict || undefined });
+  if (f.thumb) r.extras = [isVideo
+    ? { name: 'thumb', type: 'video.thumbnail', params: { at: num(f.thumbAt) ?? 1 } }
+    : { name: 'thumb', type: 'image.convert', params: { format: 'webp', width: 320, quality: 75 } }];
+  return r;
+}
+function fromRule(r) {
+  if (r.graph || !r.match) return null;
+  const c = r.compress || {}, video = r.match.kind === 'video';
+  const t = (r.extras || []).find((x) => x.name === 'thumb');
+  return { kind: video ? 'video' : 'image', formats: r.match.formats || [],
+    width: r.resize?.width ?? '', maxHeight: r.resize?.maxHeight ?? '', convert: (video ? r.convert?.codec : r.convert?.format) || '',
+    quality: c.quality ?? '', minQuality: c.minQuality ?? '', minSsim: c.minSsim ?? '', maxKB: c.maxBytes ? c.maxBytes / 1000 : '',
+    strict: !!c.strict, thumb: !!t, thumbAt: t?.params?.at ?? 1 };
+}
+
+function field(label, key, f, type = 'number', step) {
+  const i = el('input', { type, value: f[key] ?? '' }); if (step) i.step = step;
+  i.addEventListener('input', () => { f[key] = i.value; sync(); });
+  return el('div', {}, el('label', { textContent: label }), i);
+}
+function renderBuilder() {
+  $('builder').replaceChildren(...rules.map((f, idx) => {
+    const video = f.kind === 'video';
+    const head = el('header', {}, el('span', { textContent: `Règle ${idx + 1} — ${video ? 'vidéo' : 'image'}` }),
+      el('button', { className: 'ghost', type: 'button', textContent: 'Supprimer', onclick: () => { rules.splice(idx, 1); renderBuilder(); sync(); } }));
+    const chips = video ? el('div') : el('div', { className: 'chips' }, el('label', { textContent: 'Quand le fichier est :' }),
+      ...IMG_FORMATS.map((fm) => { const cb = el('input', { type: 'checkbox', checked: f.formats.includes(fm) });
+        cb.addEventListener('change', () => { f.formats = cb.checked ? [...f.formats, fm] : f.formats.filter((x) => x !== fm); sync(); });
+        return el('label', {}, cb, fm); }),
+      el('div', { className: 'hint', textContent: 'Aucun format coché = toutes les images (règle par défaut).' }));
+    const conv = el('select'); const opts = video ? ['h264', 'av1', 'vp9'] : ['webp', 'avif', 'jpeg', 'png'];
+    conv.append(el('option', { value: '', textContent: 'garder le format' }), ...opts.map((o) => el('option', { value: o, textContent: o, selected: f.convert === o })));
+    conv.addEventListener('change', () => { f.convert = conv.value; sync(); });
+    const sizeF = video ? field('Hauteur max (px)', 'maxHeight', f) : field('Largeur max (px)', 'width', f);
+    const row1 = el('div', { className: 'grid4' }, el('div', {}, el('label', { textContent: 'Convertir en' }), conv), sizeF,
+      ...(video ? [field('Qualité mesurée min (SSIM)', 'minSsim', f, 'number', '0.01'), field('Poids max (Ko)', 'maxKB', f)]
+        : [field('Qualité visée', 'quality', f), field('Plancher de qualité', 'minQuality', f)]));
+    const row2 = video ? null : el('div', { className: 'grid4' }, field('Qualité mesurée min (SSIM)', 'minSsim', f, 'number', '0.01'), field('Poids max (Ko)', 'maxKB', f));
+    const strict = el('input', { type: 'checkbox', checked: f.strict }); strict.addEventListener('change', () => { f.strict = strict.checked; sync(); });
+    const thumb = el('input', { type: 'checkbox', checked: f.thumb }); thumb.addEventListener('change', () => { f.thumb = thumb.checked; sync(); });
+    const opt = el('div', { className: 'chips' }, el('label', {}, strict, 'Échouer si un objectif n\'est pas atteint'), el('label', {}, thumb, video ? 'Produire aussi une vignette' : 'Produire aussi une miniature 320 px'));
+    return el('div', { className: 'rule' }, head, chips, row1, ...(row2 ? [row2] : []), opt,
+      el('div', { className: 'hint', textContent: 'Le moteur cherche la qualité la plus basse qui respecte le SSIM, puis vérifie le poids max. En cas de conflit, la qualité l\'emporte. SVG seul sans conversion = optimisation svgo.' }));
+  }));
+}
+function sync() { $('wdef').value = JSON.stringify({ rules: rules.map(toRule) }, null, 2); }
+function loadDefinition(def) {
+  const parsed = def?.rules ? def.rules.map(fromRule) : null;
+  if (parsed && parsed.every(Boolean)) { rules = parsed; renderBuilder(); $('builder').style.display = ''; $('addrule').style.display = ''; }
+  else { rules = []; $('builder').replaceChildren(el('div', { className: 'hint', textContent: 'Définition avancée (graphe ou liste d\'étapes) : à éditer dans le JSON ci-dessous.' })); $('addrule').style.display = 'none'; }
+  $('wdef').value = JSON.stringify(def, null, 2);
+}
+const addRule = (k) => { rules.push(newRule(k)); renderBuilder(); sync(); };
+$('addimg').addEventListener('click', () => addRule('image'));
+$('addvid').addEventListener('click', () => addRule('video'));
+$('wdef').addEventListener('change', () => { try { loadDefinition(JSON.parse($('wdef').value)); $('wmsg').textContent = ''; } catch (e) { $('wmsg').textContent = 'JSON invalide : ' + e.message; } });
 $('wload').addEventListener('change', () => {
   const w = workflows.find((x) => x.name === $('wload').value);
-  if (w) { $('wname').value = w.name; $('wdef').value = JSON.stringify(w.definition, null, 2); }
+  if (w) { $('wname').value = w.name; loadDefinition(w.definition); }
 });
 $('save').addEventListener('click', async () => {
   let definition;
@@ -84,29 +176,32 @@ $('save').addEventListener('click', async () => {
   $('wmsg').textContent = r.ok ? 'Enregistré ✔' : 'Erreur : ' + (await r.json()).error;
   if (r.ok) load();
 });
+loadDefinition({ rules: [toRule(newRule('image')), toRule(newRule('video'))] });
 
-const fmt = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' Mo' : Math.round(n / 1024) + ' Ko';
+/* ───────── Jobs ───────── */
+const fmt = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' Mo' : Math.max(1, Math.round(n / 1024)) + ' Ko';
 $('go').addEventListener('click', async () => {
   for (const file of $('files').files) {
-    const el = document.createElement('div'); el.className = 'job';
-    el.innerHTML = `<div><b></b> — <span class="st">envoi…</span></div><pre></pre>`;
-    el.querySelector('b').textContent = `${file.name} (${fmt(file.size)})`;
-    $('jobs').prepend(el);
+    const row = el('div', { className: 'job' });
+    const title = el('b', { textContent: `${file.name} (${fmt(file.size)})` });
+    const st = el('span', { className: 'st', textContent: 'envoi…' });
+    const outs = el('span'); const logs = el('pre');
+    row.append(el('div', {}, title, ' — ', st, outs), logs);
+    $('jobs').prepend(row);
     const fd = new FormData(); fd.append('file', file);
-    const r = await api('/jobs?workflow=' + encodeURIComponent($('wf').value), { method: 'POST', body: fd });
-    if (!r.ok) { el.querySelector('.st').textContent = 'refusé : ' + (await r.json()).error; continue; }
-    poll((await r.json()).id, el, file.size);
+    const hook = $('hook').value.trim();
+    const r = await api('/jobs?workflow=' + encodeURIComponent($('wf').value) + (hook ? '&webhook=' + encodeURIComponent(hook) : ''), { method: 'POST', body: fd });
+    if (!r.ok) { st.textContent = 'refusé : ' + (await r.json()).error; continue; }
+    poll((await r.json()).id, st, outs, logs);
   }
 });
-
-async function poll(id, el, inSize) {
-  const st = el.querySelector('.st');
+async function poll(id, st, outs, logs) {
   const j = await (await api('/jobs/' + id)).json();
   st.textContent = j.status; st.className = 'st ' + j.status;
-  el.querySelector('pre').textContent = j.logs.map((l) => l.message).join('\n') + (j.error ? '\nERREUR : ' + j.error : '');
+  logs.textContent = j.logs.map((l) => l.message).join('\n') + (j.error ? '\nERREUR : ' + j.error : '');
   if (j.status === 'done') {
-    st.insertAdjacentHTML('afterend', ` — <a href="${j.download_url}" download>télécharger</a>`);
-  } else if (j.status !== 'failed') setTimeout(() => poll(id, el, inSize), 1500);
+    outs.replaceChildren(...j.outputs.flatMap((o) => [' — ', el('a', { href: o.download_url, textContent: `${o.name} (${fmt(o.size)})`, download: '' })]));
+  } else if (j.status !== 'failed') setTimeout(() => poll(id, st, outs, logs), 1500);
 }
 load();
 </script>

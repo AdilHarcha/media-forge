@@ -10,6 +10,8 @@ x-app: &app
     S3_SECRET_KEY: ${S3_SECRET_KEY}
     S3_BUCKET: media
     API_KEY: ${API_KEY}
+    PUBLIC_URL: ${PUBLIC_URL:-}
+    RETENTION_DAYS: ${RETENTION_DAYS:-7}
   depends_on:
     postgres: { condition: service_healthy }
     garage: { condition: service_started }
@@ -24,7 +26,6 @@ services:
       POSTGRES_DB: forge
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U forge"]
       interval: 5s
