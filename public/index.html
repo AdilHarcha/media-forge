@@ -181,7 +181,15 @@ loadDefinition({ rules: [toRule(newRule('image')), toRule(newRule('video'))] });
 /* ───────── Jobs ───────── */
 const fmt = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' Mo' : Math.max(1, Math.round(n / 1024)) + ' Ko';
 $('go').addEventListener('click', async () => {
-  for (const file of $('files').files) {
+  const files = [...$('files').files];
+  if (!files.length) return;
+  // plusieurs fichiers = un lot, avec un ZIP de tous les résultats
+  let batch = '';
+  if (files.length > 1) {
+    const br = await api('/batches', { method: 'POST' });
+    if (br.ok) { batch = (await br.json()).id; watchBatch(batch); }
+  }
+  for (const file of files) {
     const row = el('div', { className: 'job' });
     const title = el('b', { textContent: `${file.name} (${fmt(file.size)})` });
     const st = el('span', { className: 'st', textContent: 'envoi…' });
@@ -190,11 +198,24 @@ $('go').addEventListener('click', async () => {
     $('jobs').prepend(row);
     const fd = new FormData(); fd.append('file', file);
     const hook = $('hook').value.trim();
-    const r = await api('/jobs?workflow=' + encodeURIComponent($('wf').value) + (hook ? '&webhook=' + encodeURIComponent(hook) : ''), { method: 'POST', body: fd });
+    const q = '?workflow=' + encodeURIComponent($('wf').value) + (hook ? '&webhook=' + encodeURIComponent(hook) : '') + (batch ? '&batch=' + batch : '');
+    const r = await api('/jobs' + q, { method: 'POST', body: fd });
     if (!r.ok) { st.textContent = 'refusé : ' + (await r.json()).error; continue; }
     poll((await r.json()).id, st, outs, logs);
   }
 });
+function watchBatch(id) {
+  const box = el('div', { className: 'job' }, el('b', { textContent: 'Lot' }), ' — ', el('span', { textContent: 'en cours…' }));
+  $('jobs').prepend(box);
+  const tick = async () => {
+    const b = await (await api('/batches/' + id)).json().catch(() => null);
+    if (!b) return setTimeout(tick, 2000);
+    box.lastChild.replaceWith(el('span', { textContent: `${b.done}/${b.total} terminés` + (b.failed ? `, ${b.failed} en échec` : '') }));
+    if (b.finished) { if (b.zip_url) box.append(' — ', el('a', { href: b.zip_url, textContent: 'tout télécharger (ZIP)', download: '' })); }
+    else setTimeout(tick, 2000);
+  };
+  tick();
+}
 async function poll(id, st, outs, logs) {
   const j = await (await api('/jobs/' + id)).json();
   st.textContent = j.status; st.className = 'st ' + j.status;

@@ -1,25 +1,30 @@
 import Fastify from 'fastify';
 import multipart from '@fastify/multipart';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { extname } from 'node:path';
+import { extname, basename } from 'node:path';
+import archiver from 'archiver';
 import { readFile } from 'node:fs/promises';
 import { db, ensureBucket, migrate, putStream, deleteObject, getObject, signedDownloadPath, verifyDownload } from './lib.js';
 import { steps } from './steps/index.js';
 import { validateDefinition } from './pipeline.js';
 import { assertSafeWebhook } from './webhook.js';
 
+// Clés API : API_KEY et/ou API_KEYS (liste séparée par des virgules, une par application pour pouvoir la révoquer seule)
+const KEYS = [process.env.API_KEY, ...(process.env.API_KEYS || '').split(',')].map((k) => k?.trim()).filter(Boolean);
+if (KEYS.length && !process.env.DL_SECRET && !process.env.API_KEY) throw new Error('DL_SECRET requis quand seul API_KEYS est défini (signature des liens)');
+
 const app = Fastify({ logger: true });
 await app.register(multipart, { limits: { fileSize: Number(process.env.MAX_UPLOAD_BYTES || 2 * 1024 ** 3) } });
 
-const sameKey = (a = '') => {
-  const x = Buffer.from(String(a)), y = Buffer.from(process.env.API_KEY);
-  return x.length === y.length && timingSafeEqual(x, y);
+const sameKey = (given = '') => {
+  const x = Buffer.from(String(given));
+  return KEYS.reduce((ok, k) => { const y = Buffer.from(k); return (x.length === y.length && timingSafeEqual(x, y)) || ok; }, false);
 };
 
 // Auth par clé API ; la page, /health et les liens signés /dl/* sont publics
 app.addHook('onRequest', async (req, reply) => {
-  if (req.url === '/health' || req.url === '/' || req.url.startsWith('/dl/')) return;
-  if (process.env.API_KEY && !sameKey(req.headers['x-api-key'])) return reply.code(401).send({ error: 'clé API invalide' });
+  if (req.url === '/health' || req.url === '/' || req.url.startsWith('/dl/') || req.url.startsWith('/dlz/')) return;
+  if (KEYS.length && !sameKey(req.headers['x-api-key'])) return reply.code(401).send({ error: 'clé API invalide' });
 });
 
 const page = await readFile(new URL('../public/index.html', import.meta.url));
@@ -53,11 +58,16 @@ app.post('/jobs', async (req, reply) => {
   if (webhook) { try { await assertSafeWebhook(webhook); } catch (e) { return reply.code(400).send({ error: e.message }); } }
   const file = await req.file();
   if (!file) return reply.code(400).send({ error: 'fichier manquant (champ "file")' });
+  const batch = req.query.batch || null;
+  if (batch && !(await db.query('SELECT 1 FROM batches WHERE id = $1', [batch]).catch(() => ({ rowCount: 0 }))).rowCount) {
+    return reply.code(404).send({ error: 'lot introuvable' });
+  }
   const key = `input/${randomUUID()}${extname(file.filename).toLowerCase()}`;
   await putStream(key, file.file, file.mimetype);
   if (file.file.truncated) { await deleteObject(key); return reply.code(413).send({ error: 'fichier trop volumineux' }); }
   const { rows: [job] } = await db.query(
-    'INSERT INTO jobs (workflow_id, input_key, webhook_url) VALUES ($1,$2,$3) RETURNING id, status', [wf.id, key, webhook]);
+    'INSERT INTO jobs (workflow_id, input_key, webhook_url, batch_id, input_name) VALUES ($1,$2,$3,$4,$5) RETURNING id, status',
+    [wf.id, key, webhook, batch, basename(file.filename).slice(0, 200)]);
   return reply.code(202).send(job);
 });
 
@@ -92,6 +102,44 @@ app.get('/dl/:id', async (req, reply) => {
     .header('content-length', obj.ContentLength)
     .header('content-disposition', `attachment; filename="${req.params.id.slice(0, 8)}-${out}${ext}"`)
     .send(obj.Body);
+});
+
+// ───────── Lots : plusieurs fichiers, un seul ZIP ─────────
+app.post('/batches', async (_req, reply) => reply.code(201).send((await db.query('INSERT INTO batches DEFAULT VALUES RETURNING id')).rows[0]));
+
+app.get('/batches/:id', async (req, reply) => {
+  const { rows: jobs } = await db.query(
+    'SELECT id, status, input_name, error FROM jobs WHERE batch_id = $1 ORDER BY created_at', [req.params.id]).catch(() => ({ rows: [] }));
+  if (!jobs.length) return reply.code(404).send({ error: 'lot introuvable ou vide' });
+  const count = (st) => jobs.filter((j) => j.status === st).length;
+  const finished = jobs.every((j) => ['done', 'failed'].includes(j.status));
+  return { id: req.params.id, total: jobs.length, done: count('done'), failed: count('failed'), finished, jobs,
+    zip_url: finished && count('done') ? signedDownloadPath(req.params.id, 'zip', 3600, '/dlz') : null };
+});
+
+// ZIP des résultats : flux direct depuis le stockage, sans fichier temporaire (store : les médias sont déjà compressés)
+app.get('/dlz/:id', async (req, reply) => {
+  if (!verifyDownload(req.params.id, 'zip', req.query.exp, req.query.sig)) return reply.code(403).send({ error: 'lien invalide ou expiré' });
+  const { rows } = await db.query(
+    `SELECT j.input_name, j.id AS job_id, o.name, o.key FROM jobs j JOIN job_outputs o ON o.job_id = j.id
+     WHERE j.batch_id = $1 AND j.status = 'done' ORDER BY j.created_at, o.id`, [req.params.id]).catch(() => ({ rows: [] }));
+  if (!rows.length) return reply.code(404).send({ error: 'aucun résultat disponible (lot vide ou purgé)' });
+
+  reply.hijack();
+  const res = reply.raw;
+  res.writeHead(200, { 'content-type': 'application/zip', 'content-disposition': `attachment; filename="lot-${req.params.id.slice(0, 8)}.zip"` });
+  const zip = archiver('zip', { store: true });
+  zip.on('error', (e) => { app.log.error(e); res.destroy(e); });
+  zip.pipe(res);
+  const used = new Set();
+  for (const r of rows) {
+    const stem = (r.input_name || r.job_id.slice(0, 8)).replace(/\.[^.]+$/, '').replace(/[^\w.\- ]+/g, '_');
+    let name = `${stem}${r.name === 'main' ? '' : '.' + r.name}${extname(r.key)}`;
+    for (let n = 2; used.has(name); n++) name = `${stem}-${n}${r.name === 'main' ? '' : '.' + r.name}${extname(r.key)}`;
+    used.add(name);
+    zip.append((await getObject(r.key)).Body, { name });
+  }
+  await zip.finalize();
 });
 
 await migrate();

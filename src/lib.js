@@ -55,9 +55,9 @@ export const getObject = (key) => s3.send(new GetObjectCommand({ Bucket: BUCKET,
 const secret = () => process.env.DL_SECRET || process.env.API_KEY || 'dev-secret';
 export const hmac = (data) => createHmac('sha256', secret()).update(data).digest('hex');
 const sign = (id, out, exp) => hmac(`${id}.${out}.${exp}`);
-export function signedDownloadPath(id, out = 'main', seconds = 3600) {
+export function signedDownloadPath(id, out = 'main', seconds = 3600, prefix = '/dl') {
   const exp = Math.floor(Date.now() / 1000) + seconds;
-  return `/dl/${id}?out=${encodeURIComponent(out)}&exp=${exp}&sig=${sign(id, out, exp)}`;
+  return `${prefix}/${id}?out=${encodeURIComponent(out)}&exp=${exp}&sig=${sign(id, out, exp)}`;
 }
 export function verifyDownload(id, out, exp, sig) {
   if (!exp || !sig || Number(exp) < Date.now() / 1000) return false;

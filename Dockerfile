@@ -8,5 +8,6 @@ RUN npm install --omit=dev
 COPY src ./src
 COPY public ./public
 COPY db ./db
+COPY cli ./cli
 USER node
 CMD ["node", "src/api.js"]
