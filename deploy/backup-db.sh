@@ -8,5 +8,5 @@ mkdir -p "$STACK_DIR/backups"; chmod 700 "$STACK_DIR/backups"
 OUT="$STACK_DIR/backups/forge-$(date +%u).dump"
 docker compose -p media-forge -f "$STACK_DIR/docker-compose.yml" exec -T postgres pg_dump -U forge -d forge -Fc -Z 6 > "$OUT.tmp"
 [ -s "$OUT.tmp" ] || { echo "export vide, abandon" >&2; rm -f "$OUT.tmp"; exit 1; }
-mv "$OUT.tmp" "$OUT"
+chmod 600 "$OUT.tmp"; mv "$OUT.tmp" "$OUT"
 echo "export OK $(date -u +%FT%TZ) $(stat -c %s "$OUT") octets"
