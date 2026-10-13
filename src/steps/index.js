@@ -19,7 +19,12 @@ function run(cmd, args) {
     p.on('close', (code) => (code === 0 ? resolve({ stdout, stderr }) : reject(new Error(`${cmd} exit ${code}: ${stderr.slice(-500)}`))));
   });
 }
-const ffmpeg = (args, level = 'error') => run('ffmpeg', ['-y', '-hide_banner', '-loglevel', level, ...args]);
+// ffmpeg voit tous les cœurs de l'HÔTE (pas le quota du conteneur) : sans borne il lance trop de threads et gonfle la mémoire
+const TH = String(process.env.FFMPEG_THREADS || 2);
+const THREADS = ['-threads', TH, '-filter_threads', TH, '-filter_complex_threads', TH];
+// -threads est une option PAR FICHIER : en tête (décodage/filtres) ET juste avant la sortie (encodeur)
+const ffmpeg = (args, level = 'error') =>
+  run('ffmpeg', ['-y', '-hide_banner', '-loglevel', level, ...THREADS, ...args.slice(0, -1), '-threads', TH, args.at(-1)]);
 
 // ───────────────────────── Images ─────────────────────────
 
@@ -136,9 +141,11 @@ async function transcodeVideo(input, { codec = 'h264', crf = 26, maxHeight = 108
     if (useVmaf && !(await hasVmaf())) throw new Error('libvmaf indisponible dans ce ffmpeg : utiliser minSsim');
     const target = useVmaf ? minVmaf : minSsim;
     const len = Math.min(12, dur), start = Math.max(0, dur / 2 - len / 2);
+    // preset rapide pour la recherche : à CRF égal, le preset final (plus lent) donne une qualité >= : résultat conservateur
+    const fast = CODECS('veryfast')[codec];
     const sample = async (c) => {
       const out = join(dir, `sample-crf${c}.${cfg.ext}`);
-      await ffmpeg(['-ss', String(start), '-t', String(len), '-i', input, '-vf', vf, ...cfg.v, ...cfg.crf(c), '-an', out]);
+      await ffmpeg(['-ss', String(start), '-t', String(len), '-i', input, '-vf', vf, ...fast.v, ...cfg.crf(c), '-an', out]);
       return scoreVideo(out, input, start, len, vf, useVmaf);
     };
     let lo = 16, hi = 40, chosen = lo;

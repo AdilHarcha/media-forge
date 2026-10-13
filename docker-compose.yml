@@ -14,6 +14,8 @@ x-app: &app
     DL_SECRET: ${DL_SECRET:-}
     PUBLIC_URL: ${PUBLIC_URL:-}
     RETENTION_DAYS: ${RETENTION_DAYS:-7}
+    FFMPEG_THREADS: ${FFMPEG_THREADS:-2}
+    WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
   depends_on:
     postgres: { condition: service_healthy }
     garage: { condition: service_started }

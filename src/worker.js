@@ -93,29 +93,37 @@ async function run(job) {
   if (finalStatus) await deliverWebhook(job.id).catch((e) => console.error('webhook:', e.message));
 }
 
+const CONCURRENCY = Math.max(1, Number(process.env.WORKER_CONCURRENCY || 1));   // jobs traités en même temps par ce worker
+
 async function loop() {
   await migrate();
   await ensureBucket();
   const listener = await db.connect();
-  let wake = () => {};
-  listener.on('notification', () => wake());
+  const wakers = new Set();
+  listener.on('notification', () => wakers.forEach((w) => w()));
   await listener.query('LISTEN new_job');
 
   const maintenance = () => Promise.all([purgeExpired(), reapAbandoned()]).catch((e) => console.error('maintenance:', e.message));
   maintenance();
   setInterval(maintenance, 10 * 60 * 1000).unref();   // purge de rétention + jobs abandonnés, toutes les 10 min
 
-  console.log('worker prêt');
-  for (;;) {
-    const job = await claim();
-    if (job) {
-      // une erreur inattendue ne doit jamais tuer le worker : le job sera repris par le filet "stale" (15 min)
-      await run(job).catch((e) => console.error(`job ${job.id}:`, e.message));
-      continue;
+  console.log(`worker prêt (concurrence ${CONCURRENCY})`);
+  await Promise.all(Array.from({ length: CONCURRENCY }, async () => {
+    for (;;) {
+      const job = await claim();
+      if (job) {
+        // une erreur inattendue ne doit jamais tuer le worker : le job sera repris par le filet "stale" (15 min)
+        await run(job).catch((e) => console.error(`job ${job.id}:`, e.message));
+        continue;
+      }
+      // rien à faire : dormir jusqu'à NOTIFY ou 30 s (filet de sécurité)
+      await new Promise((resolve) => {
+        const wake = () => { clearTimeout(t); wakers.delete(wake); resolve(); };
+        const t = setTimeout(wake, 30_000);
+        wakers.add(wake);
+      });
     }
-    // rien à faire : dormir jusqu'à NOTIFY ou 30 s (filet de sécurité)
-    await new Promise((r) => { wake = r; setTimeout(r, 30_000); });
-  }
+  }));
 }
 
 loop().catch((e) => { console.error(e); process.exit(1); });
