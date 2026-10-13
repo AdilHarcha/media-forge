@@ -5,7 +5,7 @@ import { db, ensureBucket, getFile, putFile, migrate } from './lib.js';
 import { steps } from './steps/index.js';
 import { detect } from './detect.js';
 import { resolvePlan } from './pipeline.js';
-import { purgeExpired } from './purge.js';
+import { purgeExpired, reapAbandoned } from './purge.js';
 import { deliverWebhook } from './webhook.js';
 
 const STALE_AFTER = '15 minutes';
@@ -83,7 +83,7 @@ async function run(job) {
     const final = job.attempts >= job.max_attempts;
     await log(job.id, null, `erreur (tentative ${job.attempts}/${job.max_attempts}): ${e.message}`);
     await db.query(
-      `UPDATE jobs SET status=$2, error=$3, finished_at=CASE WHEN $2='failed' THEN now() END WHERE id=$1`,
+      `UPDATE jobs SET status=$2::job_status, error=$3, finished_at=CASE WHEN $2::job_status = 'failed' THEN now() END WHERE id=$1`,
       [job.id, final ? 'failed' : 'queued', e.message]);
     if (final) finalStatus = 'failed';
   } finally {
@@ -101,13 +101,18 @@ async function loop() {
   listener.on('notification', () => wake());
   await listener.query('LISTEN new_job');
 
-  purgeExpired();
-  setInterval(purgeExpired, 60 * 60 * 1000).unref();   // purge de rétention toutes les heures
+  const maintenance = () => Promise.all([purgeExpired(), reapAbandoned()]).catch((e) => console.error('maintenance:', e.message));
+  maintenance();
+  setInterval(maintenance, 10 * 60 * 1000).unref();   // purge de rétention + jobs abandonnés, toutes les 10 min
 
   console.log('worker prêt');
   for (;;) {
     const job = await claim();
-    if (job) { await run(job); continue; }
+    if (job) {
+      // une erreur inattendue ne doit jamais tuer le worker : le job sera repris par le filet "stale" (15 min)
+      await run(job).catch((e) => console.error(`job ${job.id}:`, e.message));
+      continue;
+    }
     // rien à faire : dormir jusqu'à NOTIFY ou 30 s (filet de sécurité)
     await new Promise((r) => { wake = r; setTimeout(r, 30_000); });
   }

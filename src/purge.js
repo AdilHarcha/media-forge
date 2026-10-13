@@ -34,3 +34,12 @@ export async function purgeExpired() {
   if (n) console.log(`purge: ${n} job(s) nettoyé(s) (rétention ${DAYS} j)`);
   return n;
 }
+
+// Un job "running" dont le worker a disparu ET qui a épuisé ses tentatives ne sera jamais repris par claim() : on le clôt en échec.
+export async function reapAbandoned() {
+  const { rowCount } = await db.query(
+    `UPDATE jobs SET status = 'failed', error = COALESCE(error, 'abandonné (worker interrompu)'), finished_at = now()
+     WHERE status = 'running' AND locked_at < now() - interval '15 minutes' AND attempts >= max_attempts`);
+  if (rowCount) console.log(`reap: ${rowCount} job(s) abandonné(s) clos en échec`);
+  return rowCount;
+}
