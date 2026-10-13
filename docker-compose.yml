@@ -1,0 +1,60 @@
+name: media-forge
+
+x-app: &app
+  build: .
+  restart: unless-stopped
+  environment:
+    DATABASE_URL: postgres://forge:${POSTGRES_PASSWORD}@postgres:5432/forge
+    S3_ENDPOINT: http://minio:9000
+    S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+    S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+    S3_BUCKET: media
+    API_KEY: ${API_KEY}
+  depends_on:
+    postgres: { condition: service_healthy }
+    minio: { condition: service_started }
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: forge
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: forge
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forge"]
+      interval: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - miniodata:/data
+
+  api:
+    <<: *app
+    command: ["node", "src/api.js"]
+    ports:
+      - "127.0.0.1:3100:3000"
+
+  worker:
+    <<: *app
+    command: ["node", "src/worker.js"]
+    # Limites strictes : le transcodage ne doit jamais saturer l'hôte
+    cpus: 2
+    mem_limit: 2g
+    deploy:
+      replicas: 1   # augmenter / ajouter des nodes : tous piochent dans la même file Postgres
+
+volumes:
+  pgdata:
+  miniodata:
