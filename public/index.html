@@ -99,6 +99,21 @@
   .opt.on { border-color:var(--accent); background:var(--surface); }
   .opt-h { display:flex; align-items:center; gap:9px; cursor:pointer; font-size:14px; }
   .opt > div:not(.opt-h) { margin-top:10px; }
+  .wbar { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+  .wtabs { display:flex; gap:6px; flex-wrap:wrap; flex:1; min-width:0; }
+  .wtab { display:flex; align-items:center; gap:8px; padding:6px 8px 6px 13px; border:1px solid var(--line); background:var(--surface); border-radius:11px; cursor:pointer; font-size:14px; max-width:230px; }
+  .wtab:hover { border-color:var(--accent); }
+  .wtab.on { border-color:var(--accent); background:var(--accent-soft); color:var(--accent); font-weight:600; }
+  .wname { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .wdot { font-size:11.5px; font-weight:700; padding:1px 7px; border-radius:6px; }
+  .wdot.ok { background:var(--ok-soft); color:var(--ok); } .wdot.err { background:var(--err-soft); color:var(--err); }
+  .wdot.run { width:10px; height:10px; padding:0; border-radius:50%; background:var(--accent); animation:pulse 1s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity:.25; } }
+  .wprog { font-size:11.5px; color:var(--muted); font-weight:400; }
+  .wx { border:0; background:transparent; color:var(--muted); width:22px; height:22px; border-radius:6px; line-height:1; font-size:16px; padding:0; }
+  .wx:hover:not(:disabled) { background:var(--err-soft); color:var(--err); } .wx:disabled { opacity:.35; cursor:not-allowed; }
+  .wedit { width:130px; padding:2px 6px; border:1px solid var(--accent); border-radius:6px; background:var(--bg); font:inherit; color:inherit; }
+  .timing { font-size:12.5px; color:var(--muted); margin-top:3px; } .timing b { color:var(--fg); font-weight:600; }
   .paneRow { display:flex; align-items:center; gap:10px; padding:0 16px 12px; }
   .genpane { padding:2px 16px 16px; }
   .txt { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:9px; background:var(--bg); font:inherit; color:inherit; }
@@ -181,7 +196,9 @@
 </header>
 
 <main>
-  <p class="lead">Construisez votre chaîne de traitement : déposez vos fichiers, ajoutez des étapes, lancez. 100 % auto-hébergé, sans limite de poids de service tiers.</p>
+  <p class="lead">Construisez votre chaîne de traitement : déposez vos fichiers (ou générez une image), ajoutez des étapes, lancez. Chaque onglet est un workflow indépendant : vous pouvez en faire tourner plusieurs en même temps.</p>
+
+  <div class="wbar"><div class="wtabs" id="wtabs" role="tablist"></div><button class="ghost" id="wNew" type="button">+ Nouveau workflow</button><button class="ghost" id="wDup" type="button" title="Copie les réglages (sans les fichiers)">Dupliquer</button></div>
 
   <div class="presets" id="presets"></div>
 
@@ -282,9 +299,9 @@ document.addEventListener('click', (e) => {
 });
 
 /* ───────── État : une chaîne par type de média ───────── */
-let uid = 0;
-const state = { kind: 'image', chains: { image: [], video: [] }, files: [], saved: [], source: 'files',
-  gen: { auth: 'subscription', prompt: '', count: 1, aspect: '1:1', refs: [], apiKey: store.get('mf_openai'), remember: !!store.get('mf_openai'), model: '' } };
+let uid = 0, wsSeq = 0;
+let state = null;                       // espace de travail (workflow) actif
+const SHARED = { saved: [] };           // chaînes enregistrées : communes à tous les espaces
 
 const STEP_DEFS = {
   resize:   { title: 'Redimensionner', desc: 'Limiter les dimensions (sans jamais agrandir)', max: 1 },
@@ -320,6 +337,95 @@ const PRESETS = {
   ],
 };
 
+/* ───────── Espaces de travail : plusieurs workflows en parallèle ───────── */
+const workspaces = [];
+const newGen = () => ({ auth: 'subscription', prompt: '', count: 1, aspect: '1:1', refs: [], apiKey: store.get('mf_openai'), remember: !!store.get('mf_openai'), model: '' });
+function uniqueName() { let k = 1; while (workspaces.some((w) => w.name === `Workflow ${k}`)) k++; return `Workflow ${k}`; }
+function makeWorkspace(name, from) {
+  const ws = { id: ++uid, name: name || uniqueName(), kind: 'image', source: 'files', files: [], gen: newGen(), hook: '', hint: '', running: false, zipUrl: '', run: null,
+    chains: { image: PRESETS.image[0].steps.map(([t, o]) => mk(t, 'image', o)), video: PRESETS.video[0].steps.map(([t, o]) => mk(t, 'video', o)) } };
+  if (from) {                               // duplication : mêmes réglages, sans fichiers ni résultats
+    for (const k of ['image', 'video']) ws.chains[k] = (from.chains[k] || []).map((st) => migrate({ ...st, id: ++uid }, k));
+    ws.kind = from.kind; ws.source = from.source; ws.hook = from.hook;
+    Object.assign(ws.gen, from.gen, { refs: [] });
+  }
+  return ws;
+}
+
+const wsCounts = (ws) => {
+  const started = ws.files.filter((f) => f.phase && f.phase !== 'ready');
+  return { total: started.length, busy: started.filter((f) => f.phase === 'busy').length, done: started.filter((f) => f.phase === 'done').length, err: started.filter((f) => f.phase === 'error').length };
+};
+function updateTabs() {
+  if (document.querySelector('.wedit')) return;           // renommage en cours : on ne reconstruit pas
+  $('wtabs').replaceChildren(...workspaces.map((ws) => {
+    const c = wsCounts(ws);
+    const label = el('span', { className: 'wname', textContent: ws.name, title: 'Double-clic pour renommer' });
+    label.ondblclick = (e) => { e.stopPropagation(); renameWs(ws, label); };
+    const tab = el('div', { className: 'wtab' + (ws === state ? ' on' : ''), role: 'tab', tabIndex: 0 }, label);
+    if (ws.running) tab.append(el('span', { className: 'wdot run', title: 'en cours' }), el('span', { className: 'wprog', textContent: `${c.done + c.err}/${c.total || '…'}` }));
+    else if (c.done) tab.append(el('span', { className: 'wdot ok', textContent: '✓ ' + c.done }));
+    else if (c.err) tab.append(el('span', { className: 'wdot err', textContent: '!' }));
+    if (workspaces.length > 1) tab.append(el('button', { className: 'wx', type: 'button', title: ws.running ? 'Traitement en cours' : 'Fermer ce workflow', textContent: '×', disabled: ws.running, onclick: (e) => { e.stopPropagation(); closeWs(ws); } }));
+    tab.onclick = () => switchWs(ws);
+    tab.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); switchWs(ws); } };
+    return tab;
+  }));
+}
+function renameWs(ws, label) {
+  const input = el('input', { className: 'wedit', value: ws.name, maxLength: 24 });
+  label.replaceWith(input); input.focus(); input.select();
+  input.onclick = (e) => e.stopPropagation();
+  input.onblur = () => { ws.name = input.value.trim() || ws.name; input.remove(); updateTabs(); };
+  input.onkeydown = (e) => { if (e.key === 'Enter') input.blur(); if (e.key === 'Escape') { input.value = ws.name; input.blur(); } };
+}
+function viewAll() {                         // affiche l'espace actif en entier
+  $('hook').value = state.hook;
+  $('zip').hidden = !state.zipUrl; if (state.zipUrl) $('zip').href = state.zipUrl;
+  render(); renderResults(); updateTabs();
+}
+function switchWs(ws) { if (ws === state) return; closeMenu(); state = ws; viewAll(); }
+function addWs(from) {
+  if (workspaces.length >= 8) { setHint(state, '8 workflows maximum.'); return; }
+  const ws = makeWorkspace(null, from); workspaces.push(ws); switchWs(ws);
+}
+function closeWs(ws) {
+  if (ws.running) return;
+  const i = workspaces.indexOf(ws);
+  ws.files.forEach((f) => URL.revokeObjectURL(f.url));
+  workspaces.splice(i, 1);
+  if (state === ws) { state = workspaces[Math.max(0, i - 1)]; viewAll(); } else updateTabs();
+}
+$('wNew').onclick = () => addWs();
+$('wDup').onclick = () => addWs(state);
+$('hook').addEventListener('input', () => { state.hook = $('hook').value; });
+
+// réglages (pas les fichiers) conservés d'une visite à l'autre
+let lastSaved = '';
+function saveWorkspaces() {
+  try {
+    const data = JSON.stringify({ active: Math.max(0, workspaces.indexOf(state)), list: workspaces.map((w) => ({
+      name: w.name, kind: w.kind, source: w.source, hook: w.hook, gen: { ...w.gen, refs: [], apiKey: '' },
+      chains: { image: w.chains.image.map(({ id, ...st }) => st), video: w.chains.video.map(({ id, ...st }) => st) } })) });
+    if (data !== lastSaved) { lastSaved = data; store.set('mf_ws', data); }
+  } catch {}
+}
+setInterval(saveWorkspaces, 2000);
+function restoreWorkspaces() {
+  try {
+    const d = JSON.parse(store.get('mf_ws') || 'null');
+    if (!d?.list?.length) return 0;
+    for (const w of d.list.slice(0, 8)) {
+      const ws = makeWorkspace(String(w.name || '').slice(0, 24) || null);
+      for (const k of ['image', 'video']) if (Array.isArray(w.chains?.[k])) ws.chains[k] = w.chains[k].filter((st) => STEP_DEFS[st.type]).map((st) => migrate({ ...st, id: ++uid }, k));
+      ws.kind = w.kind === 'video' ? 'video' : 'image'; ws.source = w.source === 'generate' ? 'generate' : 'files'; ws.hook = String(w.hook || '');
+      Object.assign(ws.gen, w.gen || {}, { refs: [], apiKey: store.get('mf_openai') });
+      workspaces.push(ws);
+    }
+    return Math.min(Number(d.active) || 0, workspaces.length - 1);
+  } catch { workspaces.length = 0; return 0; }
+}
+
 /* ───────── Compilation chaîne → définition de workflow ───────── */
 // Les étapes sont fusionnées en UN seul encodage : deux passes avec perte dégraderaient deux fois le fichier.
 function toRule(kind, chain) {
@@ -350,9 +456,9 @@ function toRule(kind, chain) {
   rule.compress = c;
   return rule;
 }
-const compile = () => ({
-  rules: [toRule('image', state.chains.image), toRule('video', state.chains.video)],
-  ui: { image: state.chains.image.map(({ id, ...s }) => s), video: state.chains.video.map(({ id, ...s }) => s) },
+const compile = (ws = state) => ({
+  rules: [toRule('image', ws.chains.image), toRule('video', ws.chains.video)],
+  ui: { image: ws.chains.image.map(({ id, ...s }) => s), video: ws.chains.video.map(({ id, ...s }) => s) },
 });
 const hash = (s) => { let h = 2166136261; for (const ch of s) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); } return (h >>> 0).toString(16); };
 
@@ -444,7 +550,19 @@ async function refreshBridge() {
 }
 setInterval(() => document.querySelector('.bridge-pill') && refreshBridge(), 10000);
 const canGenerate = () => state.source === 'generate' && state.gen.prompt.trim().length >= 3 && (state.gen.auth === 'subscription' || state.gen.apiKey.trim() || serverKey);
-function updateGo() { if (!running) $('go').disabled = state.source === 'generate' ? !canGenerate() : !state.files.length; }
+function updateGo() {
+  $('go').disabled = state.running || (state.source === 'generate' ? !canGenerate() : !state.files.length);
+  $('go').textContent = state.running ? 'Traitement en cours…' : state.source === 'generate' ? 'Générer puis traiter' : 'Lancer le traitement';
+}
+const defaultHint = () => state.source === 'files' && !state.files.length ? 'Ajoutez des fichiers pour commencer.' : state.source === 'generate' && !canGenerate() ? 'Décrivez l’image à générer pour commencer.' : '';
+function refreshHint() { $('goHint').textContent = state.hint || (state.running ? '' : defaultHint()); }
+function setHint(ws, text) { ws.hint = text; if (ws === state) refreshHint(); }
+const dur = (ms) => {
+  const t = ms / 1000;
+  if (t < 1) return '< 1 s';
+  if (t < 60) return (t < 10 ? t.toFixed(1).replace('.', ',') : Math.round(t)) + ' s';
+  const r = Math.round(t); return `${Math.floor(r / 60)} min ${String(r % 60).padStart(2, '0')} s`;
+};
 
 const REF_OK = /^image\/(png|jpeg|webp)$/;
 function addRefs(list) {
@@ -456,7 +574,7 @@ function addRefs(list) {
     g.refs.push({ id: ++uid, file, url: URL.createObjectURL(file) });
   }
   renderGenPane();
-  if (msgs.length) $('goHint').textContent = msgs.join(' · ');
+  if (msgs.length) setHint(state, msgs.join(' · '));
 }
 
 function renderGenPane() {
@@ -515,7 +633,6 @@ function renderSource() {
   const gen = state.source === 'generate';
   document.querySelectorAll('#srcTabs button').forEach((b) => b.classList.toggle('on', b.dataset.s === state.source));
   $('filesPane').hidden = gen; $('genPane').hidden = !gen;
-  if (!running) $('go').textContent = gen ? 'Générer puis traiter' : 'Lancer le traitement';
   if (gen) { state.kind = 'image'; renderGenPane(); }
 }
 $('srcTabs').onclick = (e) => { const v = e.target.dataset?.s; if (v && v !== state.source) { state.source = v; render(); } };
@@ -567,9 +684,9 @@ function render() {
   if (!chain.length) wrap.querySelector('.link').after(el('div', { className: 'empty', textContent: `Aucune étape : ajoutez-en une ou choisissez un préréglage ${kind === 'video' ? 'vidéo' : 'image'}.` }), el('div', { className: 'link' }));
   const notes = [];
   if (chain.filter((s) => ['convert', 'compress', 'resize'].includes(s.type)).length > 1) notes.push('Redimensionnement, conversion et compression sont fusionnés en un seul encodage : le fichier n\'est jamais dégradé deux fois.');
-  $('goHint').textContent = state.source === 'files' && !state.files.length ? 'Ajoutez des fichiers pour commencer.' : state.source === 'generate' && !canGenerate() ? 'Décrivez l’image à générer pour commencer.' : '';
+  refreshHint();
   renderPresets(); renderFiles();
-  updateGo();
+  updateGo(); updateTabs();
   const old = $('stepsWrap').querySelector('.fuse'); old?.remove();
   if (notes.length) wrap.append(el('div', { className: 'note fuse', textContent: notes[0], style: 'margin:-6px 0 8px' }));
 }
@@ -578,7 +695,7 @@ function renderPresets() {
   const kind = state.kind, box = $('presets');
   box.replaceChildren(el('small', { textContent: 'Préréglages :' }));
   PRESETS[kind].forEach((p) => box.append(el('button', { className: 'chip', type: 'button', textContent: p.name, onclick: () => { state.chains[kind] = p.steps.map(([t, o]) => mk(t, kind, o)); render(); } })));
-  state.saved.forEach((p) => box.append(el('button', { className: 'chip saved', type: 'button', textContent: p.name, title: 'Préréglage enregistré',
+  SHARED.saved.forEach((p) => box.append(el('button', { className: 'chip saved', type: 'button', textContent: p.name, title: 'Préréglage enregistré',
     onclick: () => useSaved(p) })));
 }
 
@@ -587,14 +704,14 @@ const IMG_EXT = /\.(jpe?g|png|webp|avif|gif|svg)$/i, VID_EXT = /\.(mp4|m4v|mov|w
 const kindOf = (f) => f.type.startsWith('video/') || VID_EXT.test(f.name) ? 'video' : f.type.startsWith('image/') || IMG_EXT.test(f.name) ? 'image' : null;
 const typeLabel = (f) => (f.name.match(/\.([a-z0-9]+)$/i)?.[1] || f.type.split('/')[1] || '?').toUpperCase().replace('JPG', 'JPEG');
 
-function addFiles(list) {
+function addFiles(list, ws = state) {
   const accepted = [...list].filter((f) => kindOf(f));
   const skipped = list.length - accepted.length;
-  const added = accepted.map((file) => { const f = { id: ++uid, file, kind: kindOf(file), url: URL.createObjectURL(file), phase: 'ready' }; state.files.push(f); return f; });
+  const added = accepted.map((file) => { const f = { id: ++uid, file, kind: kindOf(file), url: URL.createObjectURL(file), phase: 'ready' }; ws.files.push(f); return f; });
   // l'onglet suit le type déposé (un dépôt mixte garde l'onglet courant ; les deux chaînes sont envoyées au moteur)
-  if (accepted.length && accepted.every((f) => kindOf(f) === kindOf(accepted[0]))) state.kind = kindOf(accepted[0]);
-  if (skipped) $('goHint').textContent = `${skipped} fichier(s) ignoré(s) : type non pris en charge.`;
-  render();
+  if (accepted.length && accepted.every((f) => kindOf(f) === kindOf(accepted[0]))) ws.kind = kindOf(accepted[0]);
+  if (skipped) setHint(ws, `${skipped} fichier(s) ignoré(s) : type non pris en charge.`);
+  if (ws === state) render(); else updateTabs();
   return added;
 }
 
@@ -646,8 +763,8 @@ function upload(url, file, onProgress) {
   });
 }
 
-async function ensureWorkflow() {
-  const definition = compile();
+async function ensureWorkflow(ws) {
+  const definition = compile(ws);
   const name = 'ui-' + hash(JSON.stringify(definition));
   const r = await api('/workflows', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, definition }) });
   if (r.status === 401) { $('keybox').hidden = false; throw new Error('Clé API invalide : saisissez-la en haut à droite.'); }
@@ -655,23 +772,28 @@ async function ensureWorkflow() {
   return name;
 }
 
-let running = false;
 $('go').onclick = async () => {
-  if (running || $('go').disabled) return;
-  running = true; $('go').disabled = true; $('zip').hidden = true; $('goHint').textContent = '';
+  const ws = state;                                  // l'espace qui lance : il continue même si on change d'onglet
+  if (ws.running || $('go').disabled) return;
+  ws.running = true; ws.zipUrl = ''; ws.hint = ''; ws.run = { t0: Date.now(), genMs: 0, tEnd: 0 };
+  $('zip').hidden = true; updateGo(); refreshHint(); updateTabs();
+  const abort = (msg) => { setHint(ws, msg); ws.run = null; ws.running = false; if (ws === state) updateGo(); updateTabs(); };
   let wf;
-  try { wf = await ensureWorkflow(); } catch (e) { $('goHint').textContent = e.message; running = false; updateGo(); return; }
+  try { wf = await ensureWorkflow(ws); } catch (e) { return abort(e.message); }
   let generated = null;
-  if (state.source === 'generate') {
-    try { generated = await generateImages(); }
-    catch (e) { $('goHint').textContent = e.message; running = false; updateGo(); return; }
+  if (ws.source === 'generate') {
+    const g0 = Date.now();
+    try { generated = await generateImages(ws); } catch (e) { return abort(e.message); }
+    ws.run.genMs = Date.now() - g0;
   }
-  const todo = generated ?? state.files.filter((f) => f.phase !== 'busy');
-  todo.forEach((f) => Object.assign(f, { phase: 'busy', pct: 0, status: 'Envoi…', out: null, error: null }));
-  renderResults();
+  const todo = generated ?? ws.files.filter((f) => f.phase !== 'busy');
+  const t1 = Date.now();
+  todo.forEach((f) => Object.assign(f, { phase: 'busy', pct: 0, status: 'Envoi…', out: null, error: null, t0: t1, tEnd: 0, genMs: generated ? ws.run.genMs : 0, outBlobUrl: null }));
+  if (ws === state) renderResults();
+  updateTabs();
   let batch = '';
   if (todo.length > 1) { const br = await api('/batches', { method: 'POST' }); if (br.ok) batch = (await br.json()).id; }
-  const hook = $('hook').value.trim();
+  const hook = ws.hook.trim();
   const q = '?workflow=' + encodeURIComponent(wf) + (hook ? '&webhook=' + encodeURIComponent(hook) : '') + (batch ? '&batch=' + batch : '');
   let next = 0;
   const lane = async () => {
@@ -683,13 +805,15 @@ $('go').onclick = async () => {
     }
   };
   await Promise.all([lane(), lane(), lane()]);
-  if (batch) watchBatch(batch);
-  running = false; updateGo(); renderResults();
+  if (batch) watchBatch(batch, ws);
+  ws.running = false; ws.run.tEnd = Date.now();       // temps total : génération + envois + traitements
+  if (ws === state) { updateGo(); renderResults(); }
+  updateTabs();
 };
 
-// Génération : abonnement (pont local) ou clé API ; les images produites deviennent des fichiers d'entrée
-async function generateImages() {
-  const g = state.gen, viaApi = g.auth === 'api';
+// Génération : abonnement (pont local) ou clé API ; les images produites deviennent des fichiers d'entrée de l'espace
+async function generateImages(ws) {
+  const g = ws.gen, viaApi = g.auth === 'api';
   const fd = new FormData();
   fd.append('provider', viaApi ? 'openai-api' : 'chatgpt'); fd.append('prompt', g.prompt.trim()); fd.append('count', String(g.count)); fd.append('aspect', g.aspect);
   if (viaApi) {
@@ -704,8 +828,7 @@ async function generateImages() {
   const { id } = await r.json();
   const t0 = Date.now(), label = viaApi ? 'l’API OpenAI' : 'ChatGPT';
   for (;;) {
-    const sec = Math.round((Date.now() - t0) / 1000);
-    $('goHint').textContent = `Génération en cours via ${label}… ${Math.floor(sec / 60)} min ${String(sec % 60).padStart(2, '0')} s${viaApi ? '' : ' (compter plusieurs minutes par image)'}`;
+    setHint(ws, `Génération en cours via ${label}… ${dur(Date.now() - t0)}${viaApi ? '' : ' (compter plusieurs minutes par image)'}`);
     const j = await (await api('/generations/' + id)).json().catch(() => null);
     if (j?.status === 'failed') throw new Error('Génération échouée : ' + (j.error || 'erreur inconnue'));
     if (j?.status === 'done') {
@@ -714,15 +837,15 @@ async function generateImages() {
         const blob = await (await fetch(o.download_url)).blob();
         files.push(new File([blob], `generation-${id.slice(0, 6)}-${o.index + 1}.${blob.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png'}`, { type: blob.type }));
       }
-      $('goHint').textContent = '';
-      return addFiles(files);
+      setHint(ws, '');
+      return addFiles(files, ws);
     }
     if (Date.now() - t0 > 25 * 60_000) throw new Error(viaApi ? 'Délai dépassé.' : 'Délai dépassé : le pont n’a pas répondu (est-il toujours lancé ?).');
     await new Promise((res) => setTimeout(res, 3000));
   }
 }
 
-function fail(f, msg) { f.phase = 'error'; f.error = msg; paint(f); }
+function fail(f, msg) { f.phase = 'error'; f.error = msg; f.tEnd = Date.now(); paint(f); }
 async function follow(f, id) {
   f.status = 'En file d\'attente…'; f.pct = null; paint(f);
   for (;;) {
@@ -731,7 +854,7 @@ async function follow(f, id) {
       const last = j.logs?.at(-1)?.message;
       if (j.status === 'running') { f.status = 'Traitement…'; f.detail = last; }
       if (j.status === 'failed') return fail(f, j.error || 'échec du traitement');
-      if (j.status === 'done') { f.phase = 'done'; f.out = j; f.detail = last; paint(f); await loadPreview(f); return paint(f); }
+      if (j.status === 'done') { f.phase = 'done'; f.tEnd = Date.now(); f.out = j; f.detail = last; paint(f); await loadPreview(f); return paint(f); }
       paint(f);
     }
     await new Promise((r) => setTimeout(r, 1200));
@@ -742,10 +865,10 @@ async function loadPreview(f) {
   if (f.kind !== 'image' || !main || !/^image\/(png|jpeg|webp|avif|gif|svg|x-icon)/.test(main.mime) || main.size > 25e6) return;
   try { f.outBlobUrl = URL.createObjectURL(await (await fetch(main.download_url)).blob()); } catch {}
 }
-function watchBatch(id) {
+function watchBatch(id, ws) {
   const tick = async () => {
     const b = await (await api('/batches/' + id)).json().catch(() => null);
-    if (b?.zip_url) { $('zip').href = b.zip_url; $('zip').hidden = false; } else if (b && !b.finished) setTimeout(tick, 1500);
+    if (b?.zip_url) { ws.zipUrl = b.zip_url; if (ws === state) { $('zip').href = b.zip_url; $('zip').hidden = false; } } else if (b && !b.finished) setTimeout(tick, 1500);
   };
   tick();
 }
@@ -758,14 +881,14 @@ function renderResults() {
   $('results').replaceChildren(...started.map((f) => { const c = card(f); cards.set(f.id, c); return c; }));
   summarize();
 }
-const paint = (f) => { const old = cards.get(f.id); if (old) { const c = card(f); old.replaceWith(c); cards.set(f.id, c); } summarize(); };
+const paint = (f) => { const old = cards.get(f.id); if (old) { const c = card(f); old.replaceWith(c); cards.set(f.id, c); } summarize(); updateTabs(); };
 
 function card(f) {
   const meta = el('div', { className: 'meta' }, el('div', { className: 'name', textContent: f.file.name, title: f.file.name }));
   const acts = el('div', { className: 'acts' });
   if (f.phase === 'busy') {
     const bar = el('div', { className: 'bar' + (f.pct == null || f.pct >= 1 ? ' busy' : '') }, el('i', { style: f.pct != null && f.pct < 1 ? `width:${Math.round(f.pct * 100)}%` : '' }));
-    meta.append(el('div', { className: 'status', textContent: f.status }), bar);
+    meta.append(el('div', { className: 'status', textContent: f.t0 ? `${f.status} · ${dur(Date.now() - f.t0)}` : f.status }), bar);
   } else if (f.phase === 'error') {
     meta.append(el('div', { className: 'status err', textContent: 'Échec : ' + f.error }));
   } else if (f.phase === 'done') {
@@ -774,6 +897,9 @@ function card(f) {
     const ext = (main.mime.split('/')[1] || '').replace('jpeg', 'jpg').replace('svg+xml', 'svg').replace('x-icon', 'ico');
     meta.append(el('div', { className: 'sizes' }, el('span', { textContent: fmt(f.file.size) }), '→', el('b', { textContent: fmt(main.size) }),
       el('span', { className: 'gain' + (diff <= 0 ? ' none' : ''), textContent: diff > 0 ? `−${diff} %` : 'déjà optimisé' }), el('span', { className: 'type', textContent: ext.toUpperCase() })));
+    const proc = f.tEnd - f.t0, total = proc + (f.genMs || 0);
+    meta.append(el('div', { className: 'timing' }, '⏱ ', el('b', { textContent: dur(total) }),
+      f.genMs ? ` · génération ${dur(f.genMs)} + traitement ${dur(proc)}` : ' · envoi + traitement'));
     if (f.outBlobUrl) acts.append(el('button', { className: 'ghost', type: 'button', textContent: 'Comparer', onclick: () => compare(f) }));
     const stem = f.file.name.replace(/\.[^.]+$/, '');
     acts.append(el('a', { className: 'ghost', href: f.outBlobUrl || main.download_url, download: f.outBlobUrl ? `${stem}.${ext}` : '', textContent: 'Télécharger' }));
@@ -789,7 +915,10 @@ function summarize() {
   const saved = before - after;
   $('outSub').textContent = `${done.length} fichier${done.length > 1 ? 's' : ''} traité${done.length > 1 ? 's' : ''}`;
   box.hidden = false;
-  box.replaceChildren(saved > 0 ? `${fmt(saved)} économisés (−${Math.round(saved / before * 100)} %)` : 'Fichiers déjà optimisés', el('span', { textContent: `${fmt(before)} → ${fmt(after)}` }));
+  const run = state.run, total = run?.tEnd ? run.tEnd - run.t0 : 0;
+  const when = total ? `⏱ Temps total : ${dur(total)}${run.genMs ? ` (génération ${dur(run.genMs)} + traitement ${dur(total - run.genMs)})` : ''}` : (state.running ? 'en cours…' : '');
+  box.replaceChildren(saved > 0 ? `${fmt(saved)} économisés (−${Math.round(saved / before * 100)} %)` : 'Fichiers déjà optimisés',
+    el('span', { textContent: `${fmt(before)} → ${fmt(after)}` }), ...(when ? [el('span', { textContent: when })] : []));
 }
 
 /* ───────── Comparaison avant / après ───────── */
@@ -811,8 +940,8 @@ async function loadSaved() {
   const r = await api('/workflows');
   if (r.status === 401) { $('keybox').hidden = false; return; }
   if (!r.ok) return;
-  state.saved = (await r.json()).filter((w) => w.definition?.ui && !w.name.startsWith('ui-')).map((w) => ({ name: w.name, ui: w.definition.ui }));
-  $('libCount').textContent = state.saved.length;
+  SHARED.saved = (await r.json()).filter((w) => w.definition?.ui && !w.name.startsWith('ui-')).map((w) => ({ name: w.name, ui: w.definition.ui }));
+  $('libCount').textContent = SHARED.saved.length;
   renderPresets(); renderLibrary();
 }
 function useSaved(p) {
@@ -830,8 +959,8 @@ function chainText(p) {
 }
 function renderLibrary() {
   const box = $('libList');
-  if (!state.saved.length) { box.replaceChildren(el('div', { className: 'empty', style: 'margin:0', textContent: 'Aucune chaîne enregistrée. Réglez votre chaîne, donnez-lui un nom ci-dessus, puis enregistrez-la.' })); return; }
-  box.replaceChildren(...state.saved.map((p) => {
+  if (!SHARED.saved.length) { box.replaceChildren(el('div', { className: 'empty', style: 'margin:0', textContent: 'Aucune chaîne enregistrée. Réglez votre chaîne, donnez-lui un nom ci-dessus, puis enregistrez-la.' })); return; }
+  box.replaceChildren(...SHARED.saved.map((p) => {
     const msg = el('span', { className: 'status' });
     const del = el('button', { className: 'ghost danger', type: 'button', textContent: 'Supprimer' });
     let armed = false;
@@ -860,19 +989,20 @@ const resetSave = () => { overwriteArmed = ''; $('savePreset').textContent = 'En
 $('savePreset').onclick = async () => {
   const name = $('presetName').value.trim();
   if (!name || /^ui-/.test(name)) { $('presetName').focus(); return; }
-  if (state.saved.some((x) => x.name === name) && overwriteArmed !== name) {
+  if (SHARED.saved.some((x) => x.name === name) && overwriteArmed !== name) {
     overwriteArmed = name; $('savePreset').textContent = 'Écraser ?'; setTimeout(resetSave, 4000); return;
   }
   resetSave();
   const r = await post(name, compile());
-  if (r.ok) { $('presetName').value = ''; await loadSaved(); $('goHint').textContent = `Chaîne « ${name} » enregistrée.`; }
+  if (r.ok) { $('presetName').value = ''; await loadSaved(); setHint(state, `Chaîne « ${name} » enregistrée.`); }
   else $('presetName').placeholder = 'Erreur : ' + await errMsg(r);
 };
 
 /* ───────── Démarrage ───────── */
-state.chains.image = PRESETS.image[0].steps.map(([t, o]) => mk(t, 'image', o));
-state.chains.video = PRESETS.video[0].steps.map(([t, o]) => mk(t, 'video', o));
-render(); renderResults(); loadSaved();
+const activeIdx = restoreWorkspaces();
+if (!workspaces.length) workspaces.push(makeWorkspace());
+state = workspaces[activeIdx];
+viewAll(); loadSaved();
 </script>
 </body>
 </html>
