@@ -95,6 +95,7 @@
   .sub-h { font-size:12.5px; color:var(--muted); margin:14px 0 6px; }
   .range { width:100%; accent-color:var(--accent); }
   .row { display:flex; align-items:center; gap:10px; }
+  .pct { display:flex; align-items:center; gap:5px; } .pct input { width:78px; padding:7px 9px; border:1px solid var(--line); border-radius:9px; background:var(--bg); }
   .chk { display:flex; align-items:center; gap:8px; font-size:13.5px; margin-top:12px; }
   .note { font-size:12.5px; color:var(--muted); background:var(--soft); border-radius:10px; padding:9px 12px; margin-top:12px; }
 
@@ -127,6 +128,16 @@
   .save { margin:0 16px 16px; display:flex; gap:8px; }
   .save input { flex:1; padding:8px 10px; border:1px solid var(--line); border-radius:9px; background:var(--bg); min-width:0; }
 
+  .thumb { cursor:zoom-in; }
+  .thumb.lg { width:56px; height:56px; }
+  .lib-item { border:1px solid var(--line); border-radius:12px; padding:12px; background:var(--bg); display:grid; gap:6px; }
+  .lib-item h4 { margin:0; font-size:15px; }
+  .lib-item p { margin:0; font-size:12.5px; color:var(--muted); white-space:pre-line; }
+  .lib-item .acts { margin-top:4px; flex-wrap:wrap; align-items:center; }
+  .danger:hover { border-color:var(--err); color:var(--err); }
+  .lib-body { padding:0 16px 16px; display:grid; gap:10px; max-height:60vh; overflow:auto; }
+  #pvBox { margin:0 16px 16px; display:grid; place-items:center; background:repeating-conic-gradient(var(--soft) 0 25%, var(--bg) 0 50%) 0 0/20px 20px; border-radius:12px; overflow:hidden; }
+  #pvBox img, #pvBox video { max-width:100%; max-height:72vh; display:block; }
   /* comparaison avant/après */
   dialog { border:0; padding:0; border-radius:16px; background:var(--surface); color:var(--fg); width:min(960px, 94vw); box-shadow:0 20px 70px rgba(0,0,0,.4); }
   dialog::backdrop { background:rgba(0,0,0,.6); }
@@ -143,6 +154,7 @@
 <header class="top">
   <div class="logo"><i><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14l8-10 8 10-8 6z"/></svg></i>MediaForge</div>
   <div class="spacer"></div>
+  <button class="ghost" id="libBtn" type="button">Mes chaînes <span class="type" id="libCount">0</span></button>
   <button class="icon-btn" id="keyBtn" title="Clé API" aria-label="Clé API"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M10.8 12.2L20 3M16 7l3 3"/></svg></button>
   <div class="keybox" id="keybox" hidden>
     <label for="key">Clé API</label>
@@ -194,13 +206,21 @@
       <details class="adv"><summary>Options avancées</summary>
         <input id="hook" placeholder="Webhook de fin de traitement (https://…), optionnel">
       </details>
-      <div class="save">
-        <input id="presetName" placeholder="Enregistrer cette chaîne comme préréglage…" maxlength="40">
-        <button class="ghost" id="savePreset" type="button">Enregistrer</button>
-      </div>
+      <div class="save"><button class="ghost" id="saveOpen" type="button">Enregistrer cette chaîne…</button></div>
     </section>
   </div>
 </main>
+
+<dialog id="libDlg">
+  <div class="cmp-head"><b>Mes chaînes</b><span class="spacer"></span><button class="icon-btn" id="libClose" aria-label="Fermer">✕</button></div>
+  <div class="save"><input id="presetName" placeholder="Nom de la chaîne actuelle (ex. Blog 1200 px)" maxlength="40"><button class="go" id="savePreset" type="button" style="padding:8px 16px;font-size:14px">Enregistrer</button></div>
+  <div class="lib-body" id="libList"></div>
+</dialog>
+
+<dialog id="pvDlg">
+  <div class="cmp-head"><b id="pvTitle"></b><span class="spacer"></span><button class="icon-btn" id="pvClose" aria-label="Fermer">✕</button></div>
+  <div id="pvBox"></div>
+</dialog>
 
 <dialog id="cmpDlg">
   <div class="cmp-head"><b id="cmpTitle">Avant / après</b><span class="spacer"></span><button class="icon-btn" id="cmpClose" aria-label="Fermer">✕</button></div>
@@ -224,7 +244,7 @@ const ICON = {
   resize: '<path d="M4 14v6h6M20 10V4h-6M4 20l7-7M20 4l-7 7"/>',
   convert: '<path d="M4 8h13l-3-3M20 16H7l3 3"/>',
   compress: '<path d="M8 4v6l-4 0M16 4v6h4M8 20v-6H4M16 20v-6h4"/>',
-  thumb: '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="11" r="2"/><path d="M21 17l-5-5-9 7"/>',
+  saved: '<path d="M5 4h11l3 3v13H5zM8 4v5h7V4M8 20v-6h8v6"/>',
 };
 const svg = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICON[name]}</svg>`;
 
@@ -245,14 +265,16 @@ const STEP_DEFS = {
   resize:   { title: 'Redimensionner', desc: 'Limiter les dimensions (sans jamais agrandir)', max: 1 },
   convert:  { title: 'Convertir',      desc: 'Changer de format ou de codec', max: 1 },
   compress: { title: 'Compresser',     desc: 'Alléger en préservant la qualité visuelle', max: 1 },
-  thumb:    { title: 'Miniature',      desc: 'Produire aussi une petite image d\'aperçu', max: 1 },
 };
 const defaults = (type, kind) => ({
   resize: kind === 'video' ? { maxHeight: 1080 } : { width: 1600, height: '' },
   convert: { to: kind === 'video' ? 'h264' : 'webp' },
-  compress: { mode: 'quality', ssim: 0.97, maxKB: kind === 'video' ? 20000 : 250, quality: 80, crf: 26, strict: false },
-  thumb: kind === 'video' ? { at: 1, width: 640 } : { width: 320 },
+  compress: { mode: 'quality', ssim: 0.97, maxKB: kind === 'video' ? 20000 : 250, level: 50, strict: false },
 }[type]);
+const migrate = (s, kind) => {          // anciens préréglages : « manuel » devenu « niveau »
+  if (s.type === 'compress' && s.mode === 'manual') { s.mode = 'level'; s.level = kind === 'video' ? Math.round(((s.crf ?? 26) - 18) * 99 / 16 + 1) : 101 - (s.quality ?? 80); }
+  return s;
+};
 const mk = (type, kind, over = {}) => ({ id: ++uid, type, ...defaults(type, kind), ...over });
 
 const PRESETS = {
@@ -277,7 +299,7 @@ function toRule(kind, chain) {
   const get = (t) => chain.find((s) => s.type === t);
   const video = kind === 'video';
   const rule = { match: { kind } };
-  const rs = get('resize'), cv = get('convert'), cp = get('compress'), th = get('thumb');
+  const rs = get('resize'), cv = get('convert'), cp = get('compress');
   if (rs) {
     if (video) { if (num(rs.maxHeight)) rule.resize = { maxHeight: num(rs.maxHeight) }; }
     else { const r = {}; if (num(rs.width)) r.width = num(rs.width); if (num(rs.height)) r.height = num(rs.height); if (Object.keys(r).length) rule.resize = r; }
@@ -287,13 +309,13 @@ function toRule(kind, chain) {
   if (cp) {
     if (cp.mode === 'quality') { c.minSsim = cp.ssim; if (!video) c.minQuality = 40; }
     else if (cp.mode === 'size') { c.maxBytes = Math.round(num(cp.maxKB || 250) * 1000); if (!video) { c.quality = 90; c.minQuality = 20; } }
-    else if (video) c.crf = num(cp.crf) ?? 26; else c.quality = num(cp.quality) ?? 80;
+    else {                                  // niveau de compression 1-100 % : 1 = quasi sans perte, 100 = poids minimal
+      const lv = Math.min(100, Math.max(1, Math.round(num(cp.level) ?? 50)));
+      if (video) c.crf = Math.round(18 + (lv - 1) * 16 / 99); else c.quality = 101 - lv;
+    }
     if (cp.strict) c.strict = true;
   } else if (video) c.crf = 23; else c.quality = 90;
   rule.compress = c;
-  if (th) rule.extras = [video
-    ? { name: 'thumb', type: 'video.thumbnail', params: { at: num(th.at) ?? 1, width: num(th.width) ?? 640 } }
-    : { name: 'thumb', type: 'image.convert', params: { format: 'webp', width: num(th.width) ?? 320, quality: 75 } }];
   return rule;
 }
 const compile = () => ({
@@ -338,12 +360,16 @@ function stepBody(s, kind) {
   }
   if (s.type === 'convert') {
     const opts = video ? [['h264', 'MP4 (H.264)', 'compatible partout'], ['av1', 'AV1 (WebM)', 'plus léger'], ['vp9', 'VP9 (WebM)', 'web']]
-      : [['webp', 'WebP', 'web, léger'], ['avif', 'AVIF', 'le plus léger'], ['jpeg', 'JPEG', 'universel'], ['png', 'PNG', 'sans perte visible'], ['', 'Garder le format', 'compression seule']];
+      : [['webp', 'WebP', 'web, léger'], ['avif', 'AVIF', 'le plus léger'], ['jpeg', 'JPEG', 'universel'], ['png', 'PNG', 'sans perte visible'], ['gif', 'GIF', 'animations conservées'], ['ico', 'ICO', 'icône / favicon'], ['svg', 'SVG', 'vectorisation'], ['', 'Garder le format', 'compression seule']];
     body.append(el('div', { className: 'f' }, el('label', { className: 'l', textContent: 'Format de sortie' }), seg(opts, s.to, (v) => { s.to = v; rerender(); })));
+    const FMT_HINT = { ico: 'Fichier .ico contenant 16, 32, 48 et 256 px (carrés, fond transparent). Le niveau de compression ne s’applique pas à l’ICO.',
+      svg: 'Vectorisation : l’image est tracée en formes de couleur. Idéal pour logos, icônes et illustrations, pas pour les photos. Le niveau de compression règle le nombre de couleurs.',
+      gif: 'Le GIF animé reste animé. Le niveau de compression règle le nombre de couleurs de la palette.' };
+    if (FMT_HINT[s.to] && !video) body.append(el('div', { className: 'note', textContent: FMT_HINT[s.to] }));
   }
   if (s.type === 'compress') {
     body.append(el('div', { className: 'f' }, el('label', { className: 'l', textContent: 'Priorité' }),
-      seg([['quality', 'Conserver la qualité visuelle', 'recommandé'], ['size', 'Viser un poids maximum'], ['manual', video ? 'Réglage manuel (CRF)' : 'Réglage manuel']], s.mode, (v) => { s.mode = v; rerender(); })));
+      seg([['quality', 'Conserver la qualité visuelle', 'recommandé'], ['size', 'Viser un poids maximum'], ['level', 'Niveau de compression (1–100 %)']], s.mode, (v) => { s.mode = v; rerender(); })));
     if (s.mode === 'quality') {
       body.append(el('div', { className: 'sub-h', textContent: 'Niveau de fidélité (mesuré, pas deviné)' }),
         seg([[0.985, 'Quasi identique', 'fichier un peu plus gros'], [0.97, 'Équilibré', 'indiscernable à l\'œil'], [0.95, 'Plus léger', 'différences minimes']], s.ssim, (v) => { s.ssim = v; rerender(); }),
@@ -351,20 +377,19 @@ function stepBody(s, kind) {
     } else if (s.mode === 'size') {
       body.append(el('div', { className: 'sub-h' }), el('div', { className: 'grid' }, numField('Poids maximum', s, 'maxKB', { min: 1, suffix: 'Ko' })),
         el('div', { className: 'hint', textContent: video ? 'Le débit est calculé pour tenir dans ce poids.' : 'La qualité baisse par paliers jusqu\'à tenir sous ce poids (plancher de sécurité à 20).' }));
-    } else if (video) {
-      const out = el('b', { textContent: s.crf });
-      const r = el('input', { type: 'range', className: 'range', min: 18, max: 34, value: s.crf }); r.oninput = () => { s.crf = Number(r.value); out.textContent = r.value; };
-      body.append(el('div', { className: 'sub-h' }), el('div', { className: 'f' }, el('label', { className: 'l', textContent: 'CRF — plus petit = meilleure qualité (18 à 34)' }), el('div', { className: 'row' }, r, out)));
     } else {
-      const out = el('b', { textContent: s.quality });
-      const r = el('input', { type: 'range', className: 'range', min: 1, max: 100, value: s.quality }); r.oninput = () => { s.quality = Number(r.value); out.textContent = r.value; };
-      body.append(el('div', { className: 'sub-h' }), el('div', { className: 'f' }, el('label', { className: 'l', textContent: 'Qualité de l\'encodeur (1 à 100)' }), el('div', { className: 'row' }, r, out)));
+      const lv = () => Math.min(100, Math.max(1, Math.round(Number(s.level) || 1)));
+      const box = el('input', { type: 'number', min: 1, max: 100, step: 1, value: s.level });
+      const r = el('input', { type: 'range', className: 'range', min: 1, max: 100, value: s.level });
+      box.oninput = () => { s.level = box.value === '' ? '' : Number(box.value); if (box.value !== '') r.value = lv(); };
+      box.onchange = () => { s.level = lv(); box.value = s.level; r.value = s.level; };
+      r.oninput = () => { s.level = Number(r.value); box.value = r.value; };
+      body.append(el('div', { className: 'sub-h' }), el('div', { className: 'f' }, el('label', { className: 'l', textContent: 'Niveau de compression : saisissez une valeur de 1 à 100 %' }),
+        el('div', { className: 'row' }, r, el('span', { className: 'pct' }, box, el('b', { textContent: '%' })))),
+        el('div', { className: 'hint', textContent: '1 % = quasi sans perte, fichier plus gros · 100 % = compression maximale, fichier le plus léger.' }));
     }
     const chk = el('input', { type: 'checkbox', checked: s.strict }); chk.onchange = () => { s.strict = chk.checked; };
     body.append(el('label', { className: 'chk' }, chk, 'Échouer si l\'objectif n\'est pas atteint'));
-  }
-  if (s.type === 'thumb') {
-    body.append(el('div', { className: 'grid' }, numField('Largeur', s, 'width', { min: 16, suffix: 'px' }), ...(video ? [numField('Image à la seconde', s, 'at', { min: 0, step: 0.5 })] : [])));
   }
   return body;
 }
@@ -372,8 +397,8 @@ function stepBody(s, kind) {
 function summary(s, kind) {
   if (s.type === 'resize') return kind === 'video' ? `Hauteur max ${s.maxHeight} px` : `Max ${s.width || '—'}${s.height ? ' × ' + s.height : ''} px`;
   if (s.type === 'convert') return ({ h264: 'MP4 (H.264)', av1: 'AV1', vp9: 'VP9', '': 'Format conservé' }[s.to] ?? s.to.toUpperCase());
-  if (s.type === 'compress') return s.mode === 'quality' ? `Fidélité ≥ ${s.ssim}` : s.mode === 'size' ? `≤ ${s.maxKB} Ko` : kind === 'video' ? `CRF ${s.crf}` : `Qualité ${s.quality}`;
-  return kind === 'video' ? `${s.width} px à ${s.at} s` : `${s.width} px`;
+  if (s.type === 'compress') return s.mode === 'quality' ? `Fidélité ≥ ${s.ssim}` : s.mode === 'size' ? `≤ ${s.maxKB} Ko` : `Compression ${s.level} %`;
+  return '';
 }
 
 function addMenu(anchor, kind) {
@@ -384,7 +409,7 @@ function addMenu(anchor, kind) {
   Object.entries(STEP_DEFS).forEach(([type, d]) => {
     const b = el('button', { type: 'button', disabled: used.has(type) });
     b.innerHTML = `<span class="badge">${svg(type)}</span>`;
-    b.append(el('span', {}, d.title, el('small', { textContent: used.has(type) ? 'Déjà dans la chaîne' : (type === 'thumb' && kind === 'video' ? 'Image de la vidéo en vignette' : d.desc) })));
+    b.append(el('span', {}, d.title, el('small', { textContent: used.has(type) ? 'Déjà dans la chaîne' : d.desc })));
     b.onclick = (e) => { e.stopPropagation(); state.chains[kind].push(mk(type, kind)); closeMenu(); render(); };
     menu.append(b);
   });
@@ -427,7 +452,7 @@ function renderPresets() {
   box.replaceChildren(el('small', { textContent: 'Préréglages :' }));
   PRESETS[kind].forEach((p) => box.append(el('button', { className: 'chip', type: 'button', textContent: p.name, onclick: () => { state.chains[kind] = p.steps.map(([t, o]) => mk(t, kind, o)); render(); } })));
   state.saved.forEach((p) => box.append(el('button', { className: 'chip saved', type: 'button', textContent: p.name, title: 'Préréglage enregistré',
-    onclick: () => { for (const k of ['image', 'video']) state.chains[k] = (p.ui[k] || []).map((s) => ({ ...s, id: ++uid })); render(); } })));
+    onclick: () => useSaved(p) })));
 }
 
 /* ───────── Fichiers ───────── */
@@ -445,17 +470,26 @@ function addFiles(list) {
   render();
 }
 
-function thumbEl(f) {
-  const t = el('div', { className: 'thumb' });
+function thumbEl(f, big) {
+  const t = el('div', { className: 'thumb' + (big ? ' lg' : ''), title: 'Cliquer pour agrandir' });
   if (f.kind === 'image') t.style.backgroundImage = `url("${f.url}")`;
   else t.append(el('video', { src: f.url + '#t=0.5', muted: true, preload: 'metadata' }));
+  t.onclick = () => preview(f);
   return t;
 }
+function preview(f) {
+  $('pvTitle').textContent = `${f.file.name} · ${fmt(f.file.size)}`;
+  $('pvBox').replaceChildren(f.kind === 'image' ? el('img', { src: f.url, alt: f.file.name }) : el('video', { src: f.url, controls: true, autoplay: true, muted: true }));
+  $('pvDlg').showModal();
+}
+$('pvClose').onclick = () => $('pvDlg').close();
+$('pvDlg').addEventListener('close', () => $('pvBox').replaceChildren());
+$('pvDlg').addEventListener('click', (e) => { if (e.target === $('pvDlg')) $('pvDlg').close(); });
 function renderFiles() {
   const box = $('fileList');
   box.replaceChildren(...state.files.map((f) => {
     const rm = el('button', { className: 'rm', type: 'button', title: 'Retirer', textContent: '×', onclick: () => { URL.revokeObjectURL(f.url); state.files = state.files.filter((x) => x !== f); render(); renderResults(); } });
-    return el('div', { className: 'file' }, thumbEl(f),
+    return el('div', { className: 'file' }, thumbEl(f, true),
       el('div', { className: 'meta' }, el('div', { className: 'name', textContent: f.file.name, title: f.file.name }),
         el('div', { className: 'info' }, el('span', { className: 'type', textContent: typeLabel(f.file) }), el('span', { textContent: fmt(f.file.size) }), el('span', { textContent: f.kind === 'video' ? 'vidéo' : 'image' }))), rm);
   }));
@@ -537,7 +571,7 @@ async function follow(f, id) {
 }
 async function loadPreview(f) {
   const main = f.out.outputs.find((o) => o.name === 'main') ?? f.out.outputs[0];
-  if (f.kind !== 'image' || !main || !/^image\/(png|jpeg|webp|avif|gif|svg)/.test(main.mime) || main.size > 25e6) return;
+  if (f.kind !== 'image' || !main || !/^image\/(png|jpeg|webp|avif|gif|svg|x-icon)/.test(main.mime) || main.size > 25e6) return;
   try { f.outBlobUrl = URL.createObjectURL(await (await fetch(main.download_url)).blob()); } catch {}
 }
 function watchBatch(id) {
@@ -569,16 +603,14 @@ function card(f) {
   } else if (f.phase === 'done') {
     const main = f.out.outputs.find((o) => o.name === 'main') ?? f.out.outputs[0];
     const diff = Math.round((1 - main.size / f.file.size) * 100);
-    const ext = (main.mime.split('/')[1] || '').replace('jpeg', 'jpg').replace('svg+xml', 'svg');
+    const ext = (main.mime.split('/')[1] || '').replace('jpeg', 'jpg').replace('svg+xml', 'svg').replace('x-icon', 'ico');
     meta.append(el('div', { className: 'sizes' }, el('span', { textContent: fmt(f.file.size) }), '→', el('b', { textContent: fmt(main.size) }),
       el('span', { className: 'gain' + (diff <= 0 ? ' none' : ''), textContent: diff > 0 ? `−${diff} %` : 'déjà optimisé' }), el('span', { className: 'type', textContent: ext.toUpperCase() })));
     if (f.outBlobUrl) acts.append(el('button', { className: 'ghost', type: 'button', textContent: 'Comparer', onclick: () => compare(f) }));
     const stem = f.file.name.replace(/\.[^.]+$/, '');
     acts.append(el('a', { className: 'ghost', href: f.outBlobUrl || main.download_url, download: f.outBlobUrl ? `${stem}.${ext}` : '', textContent: 'Télécharger' }));
-    const th = f.out.outputs.find((o) => o.name === 'thumb');
-    if (th) acts.append(el('a', { className: 'ghost', href: th.download_url, download: '', textContent: 'Miniature' }));
   }
-  return el('div', { className: 'res' }, thumbEl(f), meta, acts);
+  return el('div', { className: 'res' }, thumbEl(f, true), meta, acts);
 }
 function summarize() {
   const done = state.files.filter((f) => f.phase === 'done');
@@ -603,20 +635,70 @@ function compare(f) {
 $('cmpClose').onclick = () => $('cmpDlg').close();
 $('cmpDlg').addEventListener('click', (e) => { if (e.target === $('cmpDlg')) $('cmpDlg').close(); });
 
-/* ───────── Préréglages enregistrés ───────── */
+/* ───────── Mes chaînes (préréglages enregistrés) ───────── */
+const post = (name, definition) => api('/workflows', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, definition }) });
+const errMsg = async (r) => (await r.json().catch(() => ({}))).error || r.status;
+
 async function loadSaved() {
   const r = await api('/workflows');
   if (r.status === 401) { $('keybox').hidden = false; return; }
   if (!r.ok) return;
   state.saved = (await r.json()).filter((w) => w.definition?.ui && !w.name.startsWith('ui-')).map((w) => ({ name: w.name, ui: w.definition.ui }));
-  renderPresets();
+  $('libCount').textContent = state.saved.length;
+  renderPresets(); renderLibrary();
 }
+function useSaved(p) {
+  for (const k of ['image', 'video']) state.chains[k] = (p.ui[k] || []).filter((s) => s.type !== 'thumb').map((s) => migrate({ ...s, id: ++uid }, k));
+  if (!state.chains[state.kind].length) state.kind = state.chains.image.length ? 'image' : 'video';
+  if ($('libDlg').open) $('libDlg').close();
+  render();
+}
+function chainText(p) {
+  const part = (k, label) => {
+    const st = (p.ui[k] || []).filter((s) => s.type !== 'thumb');
+    return st.length ? `${label} : ` + st.map((s) => `${STEP_DEFS[s.type]?.title} (${summary(migrate({ ...s }, k), k)})`).join(' → ') : '';
+  };
+  return [part('image', 'Image'), part('video', 'Vidéo')].filter(Boolean).join('\n') || 'Chaîne vide';
+}
+function renderLibrary() {
+  const box = $('libList');
+  if (!state.saved.length) { box.replaceChildren(el('div', { className: 'empty', style: 'margin:0', textContent: 'Aucune chaîne enregistrée. Réglez votre chaîne, donnez-lui un nom ci-dessus, puis enregistrez-la.' })); return; }
+  box.replaceChildren(...state.saved.map((p) => {
+    const msg = el('span', { className: 'status' });
+    const del = el('button', { className: 'ghost danger', type: 'button', textContent: 'Supprimer' });
+    let armed = false;
+    del.onclick = async () => {
+      if (!armed) { armed = true; del.textContent = 'Confirmer la suppression'; setTimeout(() => { armed = false; del.textContent = 'Supprimer'; }, 4000); return; }
+      const r = await api('/workflows/' + encodeURIComponent(p.name), { method: 'DELETE' });
+      if (r.ok) loadSaved(); else msg.textContent = 'Erreur : ' + await errMsg(r);
+    };
+    const upd = el('button', { className: 'ghost', type: 'button', textContent: 'Remplacer par la chaîne actuelle', onclick: async () => {
+      const r = await post(p.name, compile());
+      msg.textContent = r.ok ? 'Mise à jour ✔' : 'Erreur : ' + await errMsg(r);
+      if (r.ok) loadSaved();
+    } });
+    return el('div', { className: 'lib-item' }, el('h4', { textContent: p.name }), el('p', { textContent: chainText(p) }),
+      el('div', { className: 'acts' }, el('button', { className: 'go', type: 'button', style: 'padding:7px 14px;font-size:14px', textContent: 'Utiliser', onclick: () => useSaved(p) }), upd, del, msg));
+  }));
+}
+const openLib = (focus) => { renderLibrary(); $('libDlg').showModal(); if (focus) $('presetName').focus(); };
+$('libBtn').onclick = () => openLib(false);
+$('saveOpen').onclick = () => openLib(true);
+$('libClose').onclick = () => $('libDlg').close();
+$('libDlg').addEventListener('click', (e) => { if (e.target === $('libDlg')) $('libDlg').close(); });
+// pas de confirm() natif : un nom déjà utilisé est écrasé au 2e clic
+let overwriteArmed = '';
+const resetSave = () => { overwriteArmed = ''; $('savePreset').textContent = 'Enregistrer'; };
 $('savePreset').onclick = async () => {
   const name = $('presetName').value.trim();
   if (!name || /^ui-/.test(name)) { $('presetName').focus(); return; }
-  const r = await api('/workflows', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, definition: compile() }) });
-  $('goHint').textContent = r.ok ? `Préréglage « ${name} » enregistré.` : 'Erreur : ' + ((await r.json().catch(() => ({}))).error || r.status);
-  if (r.ok) { $('presetName').value = ''; loadSaved(); }
+  if (state.saved.some((x) => x.name === name) && overwriteArmed !== name) {
+    overwriteArmed = name; $('savePreset').textContent = 'Écraser ?'; setTimeout(resetSave, 4000); return;
+  }
+  resetSave();
+  const r = await post(name, compile());
+  if (r.ok) { $('presetName').value = ''; await loadSaved(); $('goHint').textContent = `Chaîne « ${name} » enregistrée.`; }
+  else $('presetName').placeholder = 'Erreur : ' + await errMsg(r);
 };
 
 /* ───────── Démarrage ───────── */

@@ -3,10 +3,11 @@ import { stat, readFile, writeFile } from 'node:fs/promises';
 import sharp from 'sharp';
 import { optimize as svgo } from 'svgo';
 import { extname, join } from 'node:path';
+import ImageTracer from 'imagetracerjs';
 import { makeReference } from '../quality.js';
 
 // Chaque étape : (inputPath, params, workDir) => { path, mime, info? }
-const MIME = { webp: 'image/webp', avif: 'image/avif', jpeg: 'image/jpeg', jpg: 'image/jpeg', png: 'image/png', svg: 'image/svg+xml', mp4: 'video/mp4', webm: 'video/webm' };
+const MIME = { gif: 'image/gif', ico: 'image/x-icon', webp: 'image/webp', avif: 'image/avif', jpeg: 'image/jpeg', jpg: 'image/jpeg', png: 'image/png', svg: 'image/svg+xml', mp4: 'video/mp4', webm: 'video/webm' };
 
 // Retourne { stdout, stderr } (ffmpeg écrit ses scores sur stderr)
 function run(cmd, args) {
@@ -92,6 +93,79 @@ async function encodeImage(input, { format, quality = 80, minQuality = 40, minSs
     (warnings.length ? ` ⚠ ${warnings.join('; ')}` : '');
   return { path: best.path, mime: MIME[format], info };
 }
+
+
+// ───────────── Formats sans recherche de qualité : GIF, ICO, SVG (vectorisation) ─────────────
+
+const GIF_COLOURS = [256, 128, 64, 32, 16, 8];
+
+// ICO : conteneur de PNG (valide depuis Windows Vista et tous les navigateurs), une image carrée par taille
+function packIco(pngs, sizes) {
+  const head = Buffer.alloc(6 + 16 * pngs.length);
+  head.writeUInt16LE(1, 2); head.writeUInt16LE(pngs.length, 4);
+  let offset = head.length;
+  pngs.forEach((png, i) => {
+    const o = 6 + 16 * i, s = sizes[i];
+    head[o] = s >= 256 ? 0 : s; head[o + 1] = s >= 256 ? 0 : s;
+    head.writeUInt16LE(1, o + 4); head.writeUInt16LE(32, o + 6);
+    head.writeUInt32LE(png.length, o + 8); head.writeUInt32LE(offset, o + 12);
+    offset += png.length;
+  });
+  return Buffer.concat([head, ...pngs]);
+}
+
+async function encodeSpecial(input, { format, quality, minSsim, maxBytes, width, height, sizes = [16, 32, 48, 256] }, dir) {
+  const isSvgIn = input.endsWith('.svg');
+  const before = (await stat(input)).size;
+  const open = (opts) => sharp(input, isSvgIn ? { density: 192, ...opts } : opts).rotate();
+
+  if (format === 'ico') {
+    const list = [...new Set(sizes.map(Number))].filter((n) => n >= 8 && n <= 256).sort((a, b) => a - b);
+    const pngs = await Promise.all(list.map((n) => open().resize(n, n, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } }).png({ compressionLevel: 9 }).toBuffer()));
+    const path = join(dir, 'out.ico');
+    await writeFile(path, packIco(pngs, list));
+    const size = (await stat(path)).size;
+    return { path, mime: MIME.ico, info: `ico ${list.join('/')} px ${before}→${size} octets` };
+  }
+
+  if (format === 'gif') {
+    // GIF animé conservé (sharp réécrit toutes les images) ; le poids se règle par la palette (256 → 8 couleurs)
+    const animated = /\.(gif|webp)$/i.test(input);
+    const make = (colours) => {
+      let img = open({ animated });
+      if (width || height) img = img.resize({ width, height, fit: 'inside', withoutEnlargement: true });
+      return img.gif({ colours, effort: 7 });
+    };
+    const start = quality && !minSsim && !maxBytes ? Math.max(2, Math.round(256 * quality / 100)) : 256;
+    const path = join(dir, 'out.gif');
+    let colours = start, size;
+    for (const c of [start, ...GIF_COLOURS.filter((x) => x < start)]) {
+      colours = c;
+      await make(c).toFile(path);
+      size = (await stat(path)).size;
+      if (!maxBytes || size <= maxBytes) break;
+    }
+    return { path, mime: MIME.gif, info: `gif ${colours} couleurs ${before}→${size} octets` + (maxBytes && size > maxBytes ? ` ⚠ poids ${size} > objectif ${maxBytes}` : '') };
+  }
+
+  // svg : vectorisation (tracé de couleurs) puis svgo. Adapté aux logos, icônes et illustrations, pas aux photos.
+  const maxSide = 1024;
+  let img = open();
+  if (width || height) img = img.resize({ width, height, fit: 'inside', withoutEnlargement: true });
+  const { data, info: dim } = await img.resize({ width: maxSide, height: maxSide, fit: 'inside', withoutEnlargement: true })
+    .ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const colors = quality ? Math.min(64, Math.max(2, Math.round(quality * 0.32))) : 16;
+  const raw = ImageTracer.imagedataToSVG({ width: dim.width, height: dim.height, data: new Uint8ClampedArray(data) },
+    { numberofcolors: colors, colorsampling: 2, ltres: 1, qtres: 1, pathomit: 8, blurradius: 0, strokewidth: 0, viewbox: true, desc: false });
+  const { data: out } = svgo(raw, { multipass: true });
+  const path = join(dir, 'out.svg');
+  await writeFile(path, out);
+  const size = Buffer.byteLength(out);
+  return { path, mime: MIME.svg, info: `svg vectorisé ${colors} couleurs ${before}→${size} octets` };
+}
+
+const SPECIAL = new Set(['gif', 'ico', 'svg']);
+const encodeAny = (input, p, dir) => (SPECIAL.has(p.format) ? encodeSpecial(input, p, dir) : encodeImage(input, p, dir));
 
 // ───────────────────────── Vidéo ─────────────────────────
 
@@ -182,7 +256,7 @@ export const steps = {
     return { path: out, mime: MIME[extname(input).slice(1)] };
   },
 
-  'image.convert': encodeImage,
+  'image.convert': encodeAny,
 
   // svg → svg : optimisation sans perte visuelle
   'svg.optimize': async (input, _p, dir) => {

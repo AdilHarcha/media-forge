@@ -9,7 +9,7 @@ import { steps } from './steps/index.js';
  *
  * match    : { formats?: ["png","jpeg"], kind?: "image"|"video" }  (absent = règle par défaut ; première qui correspond)
  * resize   : { width?, height?, maxHeight? }
- * convert  : { format: "webp"|"avif"|"jpeg"|"png" } (image) / { codec: "h264"|"av1"|"vp9" } (vidéo)
+ * convert  : { format: "webp"|"avif"|"jpeg"|"png"|"gif"|"ico"|"svg" } (image) / { codec: "h264"|"av1"|"vp9" } (vidéo)
  * compress : { quality, minQuality, minSsim, maxBytes, strict }   (image)
  *            { crf, minSsim | minVmaf, maxBytes, preset, strict } (vidéo)  ·  { svgo: true } (svg → svg)
  * extras   : sorties parallèles tirées de la source : [{ name, type, params }]  ex. vignette vidéo
@@ -63,7 +63,7 @@ export function validateDefinition(def) {
     if (r.graph) { const e = validateGraph(r.graph.nodes, `règle ${i}`); if (e) return e; continue; }
     const e = validateCompress(r.compress ?? {}, i);
     if (e) return e;
-    if (r.convert?.format && !['webp', 'avif', 'jpeg', 'png'].includes(r.convert.format)) return `règle ${i}: format de sortie image inconnu`;
+    if (r.convert?.format && !['webp', 'avif', 'jpeg', 'png', 'gif', 'ico', 'svg'].includes(r.convert.format)) return `règle ${i}: format de sortie image inconnu`;
     for (const x of r.extras ?? []) {
       if (!x.name || !/^[a-z0-9_-]{1,40}$/i.test(x.name) || x.name === 'main') return `règle ${i}: extra sans nom valide`;
       if (!steps[x.type]) return `règle ${i}: extra, étape inconnue (${x.type})`;
@@ -91,7 +91,7 @@ export function resolvePlan(def, detected) {
   let main;
   if (detected.kind === 'video') {
     main = { type: 'video.transcode', params: { codec: convert?.codec ?? 'h264', ...resize, ...compress } };
-  } else if (detected.format === 'svg' && !convert) {
+  } else if (detected.format === 'svg' && (!convert || convert.format === 'svg')) {
     main = { type: 'svg.optimize', params: {} };                  // svg → svg : svgo
   } else {
     // sans "convert", on garde le format d'origine : la phase compress réencode dans le même format
