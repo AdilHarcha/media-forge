@@ -8,6 +8,7 @@ import { db, ensureBucket, migrate, putStream, deleteObject, getObject, signedDo
 import { steps } from './steps/index.js';
 import { validateDefinition } from './pipeline.js';
 import { assertSafeWebhook } from './webhook.js';
+import { registerGenerations, publicPaths } from './generations.js';
 
 // Clés API : API_KEY et/ou API_KEYS (liste séparée par des virgules, une par application pour pouvoir la révoquer seule)
 const KEYS = [process.env.API_KEY, ...(process.env.API_KEYS || '').split(',')].map((k) => k?.trim()).filter(Boolean);
@@ -23,13 +24,18 @@ const sameKey = (given = '') => {
 
 // Auth par clé API ; la page, /health et les liens signés /dl/* sont publics
 app.addHook('onRequest', async (req, reply) => {
-  if (req.url === '/health' || req.url === '/' || req.url.startsWith('/dl/') || req.url.startsWith('/dlz/')) return;
+  if (req.url === '/health' || req.url === '/' || req.url.startsWith('/dl/') || req.url.startsWith('/dlz/') || publicPaths.some((p) => req.url.startsWith(p))) return;
   if (KEYS.length && !sameKey(req.headers['x-api-key'])) return reply.code(401).send({ error: 'clé API invalide' });
 });
 
 const page = await readFile(new URL('../public/index.html', import.meta.url));
 app.get('/', async (_req, reply) => reply.type('text/html; charset=utf-8').send(page));
 app.get('/health', async () => ({ ok: true }));
+
+// le pont (agent local de génération d'images) se télécharge depuis le serveur
+const bridgeScript = await readFile(new URL('../bridge/forge-bridge.mjs', import.meta.url));
+app.get('/bridge/forge-bridge.mjs', async (_req, reply) => reply.type('text/javascript; charset=utf-8').header('content-disposition', 'attachment; filename="forge-bridge.mjs"').send(bridgeScript));
+registerGenerations(app);
 app.get('/steps', async () => Object.keys(steps));
 
 app.get('/workflows', async () => (await db.query('SELECT id, name, definition FROM workflows ORDER BY name')).rows);

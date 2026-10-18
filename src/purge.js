@@ -1,4 +1,5 @@
 import { db, deleteObject } from './lib.js';
+import { purgeGenerations } from './generations.js';
 
 const DAYS = Number(process.env.RETENTION_DAYS || 7);
 
@@ -6,6 +7,7 @@ const DAYS = Number(process.env.RETENTION_DAYS || 7);
 // La ligne du job est conservée (historique) ; seuls les objets S3 disparaissent. 0 = rétention désactivée.
 export async function purgeExpired() {
   if (!DAYS) return 0;
+  await purgeGenerations(DAYS).catch((e) => console.error('purge générations:', e.message));
   const c = await db.connect();
   let n = 0;
   try {

@@ -99,6 +99,14 @@
   .opt.on { border-color:var(--accent); background:var(--surface); }
   .opt-h { display:flex; align-items:center; gap:9px; cursor:pointer; font-size:14px; }
   .opt > div:not(.opt-h) { margin-top:10px; }
+  .prompt { width:100%; padding:9px 11px; border:1px solid var(--line); border-radius:10px; background:var(--bg); resize:vertical; font:inherit; color:inherit; }
+  .seg button:disabled { opacity:.5; cursor:not-allowed; }
+  .bridge-pill { margin-top:12px; font-size:13px; padding:7px 11px; border-radius:9px; }
+  .bridge-pill.on { background:var(--ok-soft); color:var(--ok); }
+  .bridge-pill.off { background:var(--soft); color:var(--muted); }
+  details.how { margin-top:10px; font-size:13.5px; } details.how summary { cursor:pointer; color:var(--accent); }
+  details.how ol { padding-left:20px; } details.how li { margin:6px 0; }
+  code { background:var(--soft); padding:1px 6px; border-radius:6px; font-size:12.5px; word-break:break-all; }
   .pct { display:flex; align-items:center; gap:5px; } .pct input { width:78px; padding:7px 9px; border:1px solid var(--line); border-radius:9px; background:var(--bg); }
   .chk { display:flex; align-items:center; gap:8px; font-size:13.5px; margin-top:12px; }
   .note { font-size:12.5px; color:var(--muted); background:var(--soft); border-radius:10px; padding:9px 12px; margin-top:12px; }
@@ -248,6 +256,7 @@ const ICON = {
   resize: '<path d="M4 14v6h6M20 10V4h-6M4 20l7-7M20 4l-7 7"/>',
   convert: '<path d="M4 8h13l-3-3M20 16H7l3 3"/>',
   compress: '<path d="M8 4v6l-4 0M16 4v6h4M8 20v-6H4M16 20v-6h4"/>',
+  generate: '<path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>',
   saved: '<path d="M5 4h11l3 3v13H5zM8 4v5h7V4M8 20v-6h8v6"/>',
 };
 const svg = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICON[name]}</svg>`;
@@ -266,11 +275,13 @@ let uid = 0;
 const state = { kind: 'image', chains: { image: [], video: [] }, files: [], saved: [] };
 
 const STEP_DEFS = {
+  generate: { title: 'Génération d’image', desc: 'Créer l’image avec votre abonnement ChatGPT', max: 1, imageOnly: true },
   resize:   { title: 'Redimensionner', desc: 'Limiter les dimensions (sans jamais agrandir)', max: 1 },
   convert:  { title: 'Convertir',      desc: 'Changer de format ou de codec', max: 1 },
   compress: { title: 'Compresser',     desc: 'Alléger en préservant la qualité visuelle', max: 1 },
 };
 const defaults = (type, kind) => ({
+  generate: { provider: 'chatgpt', prompt: '', count: 1, aspect: '1:1' },
   resize: kind === 'video' ? { maxHeight: 1080 } : { width: 1600, height: '' },
   convert: { to: kind === 'video' ? 'h264' : 'webp' },
   compress: { useQuality: true, ssim: 0.97, useLevel: false, level: 50, useSize: false, maxKB: kind === 'video' ? 20000 : 250, strict: false },
@@ -360,6 +371,29 @@ function stepBody(s, kind) {
   const video = kind === 'video';
   const body = el('div', { className: 'body' });
   const rerender = () => render();
+  if (s.type === 'generate') {
+    const prov = seg([['chatgpt', 'ChatGPT', 'via votre abonnement']], s.provider, () => {});
+    prov.append(el('button', { type: 'button', disabled: true, title: 'L’extension Gemini (Nano Banana) exige une clé API : pas de connexion par abonnement pour l’instant' }, 'Gemini', el('small', { textContent: 'indisponible' })));
+    const prompt = el('textarea', { className: 'prompt', rows: 3, maxLength: 4000, placeholder: 'Décrivez l’image à générer…', value: s.prompt });
+    prompt.addEventListener('input', () => { s.prompt = prompt.value; updateGo(); });
+    const pill = el('div', { className: 'bridge-pill off' });
+    body.append(
+      el('div', { className: 'f' }, el('label', { className: 'l', textContent: 'Service' }), prov),
+      el('div', { className: 'f', style: 'margin-top:12px' }, el('label', { className: 'l', textContent: 'Description (prompt)' }), prompt),
+      el('div', { className: 'grid', style: 'margin-top:12px' },
+        el('div', { className: 'f' }, el('label', { className: 'l', textContent: 'Format' }), seg([['1:1', 'Carré'], ['3:2', 'Paysage'], ['2:3', 'Portrait'], ['16:9', 'Large']], s.aspect, (v) => { s.aspect = v; rerender(); })),
+        el('div', { className: 'f' }, el('label', { className: 'l', textContent: 'Nombre d’images' }), seg([[1, '1'], [2, '2'], [3, '3'], [4, '4']], s.count, (v) => { s.count = v; rerender(); }))),
+      pill);
+    const how = el('details', { className: 'how' }, el('summary', { textContent: 'Comment connecter mon abonnement ChatGPT ?' }));
+    how.append(el('ol', {},
+      el('li', {}, 'Installez Node.js 18+ et le CLI officiel : ', el('code', { textContent: 'npm i -g @openai/codex' })),
+      el('li', {}, 'Connectez votre abonnement : ', el('code', { textContent: 'codex login' }), ' puis « Sign in with ChatGPT »'),
+      el('li', {}, 'Téléchargez le pont : ', el('a', { href: '/bridge/forge-bridge.mjs', download: 'forge-bridge.mjs', textContent: 'forge-bridge.mjs' })),
+      el('li', {}, 'Lancez-le sur votre ordinateur : ', el('code', { textContent: 'FORGE_KEY=<clé API> node forge-bridge.mjs --url ' + location.origin }), ' (PowerShell : ', el('code', { textContent: '$env:FORGE_KEY="<clé API>"; node forge-bridge.mjs --url ' + location.origin }), ')')),
+      el('p', { className: 'hint', textContent: 'Votre abonnement reste sur votre machine : le serveur ne reçoit que la demande et l’image produite. Chaque image peut prendre plusieurs minutes et consomme le quota de votre forfait. Usage personnel uniquement.' }));
+    body.append(how);
+    refreshBridge();
+  }
   if (s.type === 'resize') {
     if (video) {
       body.append(el('div', { className: 'f' }, el('label', { className: 'l', textContent: 'Hauteur maximale' }),
@@ -412,7 +446,21 @@ function stepBody(s, kind) {
   return body;
 }
 
+let bridgeOnline = null;
+async function refreshBridge() {
+  try { const r = await api('/bridge/status'); if (r.ok) bridgeOnline = (await r.json()).online.includes('chatgpt'); } catch { bridgeOnline = null; }
+  document.querySelectorAll('.bridge-pill').forEach((p) => {
+    p.className = 'bridge-pill ' + (bridgeOnline ? 'on' : 'off');
+    p.textContent = bridgeOnline ? '● Pont connecté : ChatGPT disponible' : bridgeOnline === false ? '● Aucun pont connecté : lancez forge-bridge sur votre ordinateur (voir ci-dessous)' : '● État du pont inconnu';
+  });
+}
+setInterval(() => document.querySelector('.bridge-pill') && refreshBridge(), 10000);
+const genStep = () => state.chains.image.find((x) => x.type === 'generate');
+const canGenerate = () => { const g = genStep(); return !!g && g.prompt.trim().length >= 3; };
+function updateGo() { if (!running) $('go').disabled = !state.files.length && !canGenerate(); }
+
 function summary(s, kind) {
+  if (s.type === 'generate') return `ChatGPT · ${s.count} image${s.count > 1 ? 's' : ''} · ${s.aspect}${s.prompt ? ' · « ' + s.prompt.slice(0, 40) + (s.prompt.length > 40 ? '…' : '') + ' »' : ''}`;
   if (s.type === 'resize') return kind === 'video' ? `Hauteur max ${s.maxHeight} px` : `Max ${s.width || '—'}${s.height ? ' × ' + s.height : ''} px`;
   if (s.type === 'convert') return ({ h264: 'MP4 (H.264)', av1: 'AV1', vp9: 'VP9', '': 'Format conservé' }[s.to] ?? s.to.toUpperCase());
   if (s.type === 'compress') return [s.useQuality && `Fidélité ≥ ${s.ssim}`, s.useLevel && `Compression ${s.level} %`, s.useSize && `≤ ${s.maxKB} Ko`].filter(Boolean).join(' · ');
@@ -424,11 +472,11 @@ function addMenu(anchor, kind) {
   menuFor = anchor;
   const used = new Set(state.chains[kind].map((s) => s.type));
   const menu = el('div', { className: 'menu' });
-  Object.entries(STEP_DEFS).forEach(([type, d]) => {
+  Object.entries(STEP_DEFS).filter(([, d]) => !(d.imageOnly && kind === 'video')).forEach(([type, d]) => {
     const b = el('button', { type: 'button', disabled: used.has(type) });
     b.innerHTML = `<span class="badge">${svg(type)}</span>`;
     b.append(el('span', {}, d.title, el('small', { textContent: used.has(type) ? 'Déjà dans la chaîne' : d.desc })));
-    b.onclick = (e) => { e.stopPropagation(); state.chains[kind].push(mk(type, kind)); closeMenu(); render(); };
+    b.onclick = (e) => { e.stopPropagation(); state.chains[kind][type === 'generate' ? 'unshift' : 'push'](mk(type, kind)); closeMenu(); render(); };
     menu.append(b);
   });
   anchor.parentElement.append(menu);
@@ -458,9 +506,9 @@ function render() {
   if (!chain.length) wrap.querySelector('.link').after(el('div', { className: 'empty', textContent: `Aucune étape : ajoutez-en une ou choisissez un préréglage ${kind === 'video' ? 'vidéo' : 'image'}.` }), el('div', { className: 'link' }));
   const notes = [];
   if (chain.filter((s) => ['convert', 'compress', 'resize'].includes(s.type)).length > 1) notes.push('Redimensionnement, conversion et compression sont fusionnés en un seul encodage : le fichier n\'est jamais dégradé deux fois.');
-  $('goHint').textContent = !state.files.length ? 'Ajoutez des fichiers pour commencer.' : '';
+  $('goHint').textContent = !state.files.length && !genStep() ? 'Ajoutez des fichiers pour commencer.' : !state.files.length && !canGenerate() ? 'Décrivez l’image à générer pour commencer.' : '';
   renderPresets(); renderFiles();
-  $('go').disabled = !state.files.length;
+  updateGo();
   const old = $('stepsWrap').querySelector('.fuse'); old?.remove();
   if (notes.length) wrap.append(el('div', { className: 'note fuse', textContent: notes[0], style: 'margin:-6px 0 8px' }));
 }
@@ -547,10 +595,14 @@ async function ensureWorkflow() {
 
 let running = false;
 $('go').onclick = async () => {
-  if (running || !state.files.length) return;
+  if (running || (!state.files.length && !canGenerate())) return;
   running = true; $('go').disabled = true; $('zip').hidden = true; $('goHint').textContent = '';
   let wf;
-  try { wf = await ensureWorkflow(); } catch (e) { $('goHint').textContent = e.message; running = false; $('go').disabled = false; return; }
+  try { wf = await ensureWorkflow(); } catch (e) { $('goHint').textContent = e.message; running = false; updateGo(); return; }
+  if (canGenerate()) {
+    try { await generateImages(genStep()); }
+    catch (e) { $('goHint').textContent = e.message; running = false; updateGo(); return; }
+  }
   const todo = state.files.filter((f) => f.phase !== 'busy');
   todo.forEach((f) => Object.assign(f, { phase: 'busy', pct: 0, status: 'Envoi…', out: null, error: null }));
   renderResults();
@@ -569,8 +621,35 @@ $('go').onclick = async () => {
   };
   await Promise.all([lane(), lane(), lane()]);
   if (batch) watchBatch(batch);
-  running = false; $('go').disabled = false; renderResults();
+  running = false; updateGo(); renderResults();
 };
+
+// Génération via le pont local : la demande attend qu'un pont connecté la réserve, puis les images arrivent comme des fichiers d'entrée.
+async function generateImages(g) {
+  const r = await api('/generations', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ provider: g.provider, prompt: g.prompt, count: g.count, aspect: g.aspect }) });
+  if (r.status === 401) { $('keybox').hidden = false; throw new Error('Clé API invalide : saisissez-la en haut à droite.'); }
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'génération refusée');
+  const { id } = await r.json();
+  const t0 = Date.now();
+  for (;;) {
+    const sec = Math.round((Date.now() - t0) / 1000);
+    $('goHint').textContent = `Génération en cours via ChatGPT… ${Math.floor(sec / 60)} min ${String(sec % 60).padStart(2, '0')} s (compter plusieurs minutes par image)`;
+    const j = await (await api('/generations/' + id)).json().catch(() => null);
+    if (j?.status === 'failed') throw new Error('Génération échouée : ' + (j.error || 'erreur inconnue'));
+    if (j?.status === 'done') {
+      const files = [];
+      for (const o of j.outputs) {
+        const blob = await (await fetch(o.download_url)).blob();
+        files.push(new File([blob], `generation-${id.slice(0, 6)}-${o.index + 1}.${blob.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png'}`, { type: blob.type }));
+      }
+      $('goHint').textContent = '';
+      state.kind = 'image'; addFiles(files);
+      return;
+    }
+    if (Date.now() - t0 > 25 * 60_000) throw new Error('Délai dépassé : le pont n\'a pas répondu (est-il toujours lancé ?).');
+    await new Promise((res) => setTimeout(res, 3000));
+  }
+}
 
 function fail(f, msg) { f.phase = 'error'; f.error = msg; paint(f); }
 async function follow(f, id) {

@@ -9,5 +9,6 @@ COPY src ./src
 COPY public ./public
 COPY db ./db
 COPY cli ./cli
+COPY bridge ./bridge
 USER node
 CMD ["node", "src/api.js"]
