@@ -108,6 +108,24 @@ Le nom d'une sortie est l'`id` du nœud (`main` = sortie principale). Cycles, id
 Les fichiers (source + sorties) des jobs terminés depuis plus de `RETENTION_DAYS` jours sont supprimés du stockage (toutes les 10 min, par lots de 100).
 La ligne du job reste (historique, logs). Un job `running` abandonné (worker disparu, tentatives épuisées) est clos en échec.
 
+## Génération d'images avec votre abonnement (pont local)
+
+L'étape « Génération d'image » se place en tête de la chaîne : prompt, format, 1 à 4 images, puis les étapes habituelles (redimensionner, convertir, compresser).
+**Aucune clé API, aucun jeton d'abonnement côté serveur** : un petit agent, `bridge/forge-bridge.mjs`, tourne sur *votre* ordinateur, déjà connecté à votre abonnement par le CLI officiel.
+
+```bash
+npm i -g @openai/codex && codex login          # « Sign in with ChatGPT »
+curl -O https://<votre-instance>/bridge/forge-bridge.mjs
+FORGE_KEY=<clé API> node forge-bridge.mjs --url https://<votre-instance>
+```
+
+- Le pont interroge le serveur (connexion sortante, rien à ouvrir), exécute `codex exec` avec l'outil de génération d'image, renvoie les images (conservées `RETENTION_DAYS` jours).
+- Il refuse de démarrer si Codex est connecté par clé API (la génération serait facturée) : seule la connexion ChatGPT est acceptée.
+- Chaque image peut prendre plusieurs minutes et consomme le quota du forfait. Usage personnel : n'exposez pas votre pont à d'autres, voir les [conditions « Sign in with ChatGPT »](https://openai.com/policies/sign-in-with-chatgpt-terms/).
+- `--mock` : fournisseur de test (dégradé PNG) pour vérifier l'installation sans abonnement.
+- **Gemini** : non pris en charge, l'extension Nano Banana exige une clé API (pas de connexion par abonnement).
+- API : `POST /generations`, `GET /generations/:id` ; côté pont `/bridge/claim`, `/bridge/:id/results`, `/bridge/:id/fail`.
+
 ## Architecture
 
 - La file est la table `jobs` ; les workers réservent avec `FOR UPDATE SKIP LOCKED` et sont réveillés par `LISTEN/NOTIFY`.
