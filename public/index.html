@@ -99,9 +99,10 @@
   .opt.on { border-color:var(--accent); background:var(--surface); }
   .opt-h { display:flex; align-items:center; gap:9px; cursor:pointer; font-size:14px; }
   .opt > div:not(.opt-h) { margin-top:10px; }
+  [hidden] { display:none !important; }
   .wbar { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
   .wtabs { display:flex; gap:6px; flex-wrap:wrap; flex:1; min-width:0; }
-  .wtab { display:flex; align-items:center; gap:8px; padding:6px 8px 6px 13px; border:1px solid var(--line); background:var(--surface); border-radius:11px; cursor:pointer; font-size:14px; max-width:230px; }
+  .wtab { display:flex; flex-wrap:nowrap; align-items:center; gap:8px; padding:6px 8px 6px 13px; border:1px solid var(--line); background:var(--surface); border-radius:11px; cursor:pointer; font-size:14px; max-width:340px; }
   .wtab:hover { border-color:var(--accent); }
   .wtab.on { border-color:var(--accent); background:var(--accent-soft); color:var(--accent); font-weight:600; }
   .wname { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -109,6 +110,10 @@
   .wdot.ok { background:var(--ok-soft); color:var(--ok); } .wdot.err { background:var(--err-soft); color:var(--err); }
   .wdot.run { width:10px; height:10px; padding:0; border-radius:50%; background:var(--accent); animation:pulse 1s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity:.25; } }
+  .wlab { font-size:11.5px; font-weight:600; padding:1px 7px; border-radius:6px; background:var(--soft); color:var(--muted); white-space:nowrap; }
+  .wlab.run { background:var(--accent-soft); color:var(--accent); } .wlab.ok { background:var(--ok-soft); color:var(--ok); } .wlab.err { background:var(--err-soft); color:var(--err); }
+  .wlab.new { animation:pulse 1.2s ease-in-out 4; }
+  .wtab.flash { box-shadow:0 0 0 2px var(--ok); }
   .wprog { font-size:11.5px; color:var(--muted); font-weight:400; }
   .wx { border:0; background:transparent; color:var(--muted); width:22px; height:22px; border-radius:6px; line-height:1; font-size:16px; padding:0; }
   .wx:hover:not(:disabled) { background:var(--err-soft); color:var(--err); } .wx:disabled { opacity:.35; cursor:not-allowed; }
@@ -196,9 +201,9 @@
 </header>
 
 <main>
-  <p class="lead">Construisez votre chaîne de traitement : déposez vos fichiers (ou générez une image), ajoutez des étapes, lancez. Chaque onglet est un workflow indépendant : vous pouvez en faire tourner plusieurs en même temps.</p>
+  <p class="lead">Construisez votre chaîne de traitement : déposez vos fichiers (ou générez une image), ajoutez des étapes, lancez. Chaque onglet est un workflow indépendant : vous pouvez en faire tourner plusieurs en même temps (ils se partagent alors la capacité du serveur, donc chacun peut être plus lent).</p>
 
-  <div class="wbar"><div class="wtabs" id="wtabs" role="tablist"></div><button class="ghost" id="wNew" type="button">+ Nouveau workflow</button><button class="ghost" id="wDup" type="button" title="Copie les réglages (sans les fichiers)">Dupliquer</button></div>
+  <div class="wbar"><div class="wtabs" id="wtabs" role="tablist"></div><button class="ghost" id="wNew" type="button">+ Nouveau workflow</button><button class="ghost" id="wDup" type="button" title="Copie les réglages (sans les fichiers)">Dupliquer</button><div class="note" id="wnote" hidden style="width:100%;margin:0"></div></div>
 
   <div class="presets" id="presets"></div>
 
@@ -358,14 +363,19 @@ const wsCounts = (ws) => {
 };
 function updateTabs() {
   if (document.querySelector('.wedit')) return;           // renommage en cours : on ne reconstruit pas
+  const nRun = workspaces.filter((w) => w.running).length;
+  $('wnote').hidden = nRun < 2;
+  $('wnote').textContent = `${nRun} workflows tournent en même temps : ils se partagent la capacité du serveur, donc chacun peut aller plus lentement que s’il était seul.`;
   $('wtabs').replaceChildren(...workspaces.map((ws) => {
     const c = wsCounts(ws);
     const label = el('span', { className: 'wname', textContent: ws.name, title: 'Double-clic pour renommer' });
     label.ondblclick = (e) => { e.stopPropagation(); renameWs(ws, label); };
     const tab = el('div', { className: 'wtab' + (ws === state ? ' on' : ''), role: 'tab', tabIndex: 0 }, label);
-    if (ws.running) tab.append(el('span', { className: 'wdot run', title: 'en cours' }), el('span', { className: 'wprog', textContent: `${c.done + c.err}/${c.total || '…'}` }));
-    else if (c.done) tab.append(el('span', { className: 'wdot ok', textContent: '✓ ' + c.done }));
-    else if (c.err) tab.append(el('span', { className: 'wdot err', textContent: '!' }));
+    if (ws.running) tab.append(el('span', { className: 'wdot run', title: 'en cours' }), el('span', { className: 'wlab run', textContent: `En cours ${c.done + c.err}/${c.total || '…'}` }));
+    else if (c.err && !c.done) tab.append(el('span', { className: 'wlab err', textContent: 'Échec' }));
+    else if (c.done) tab.append(el('span', { className: 'wlab ok' + (ws.unseen ? ' new' : ''), textContent: (c.err ? 'Terminé avec erreurs' : 'Terminé') + (ws.unseen ? ' · nouveau' : '') }));
+    else if (c.total === 0 && ws.files.length) tab.append(el('span', { className: 'wlab', textContent: 'Prêt' }));
+    if (ws.unseen && ws !== state) tab.classList.add('flash');
     if (workspaces.length > 1) tab.append(el('button', { className: 'wx', type: 'button', title: ws.running ? 'Traitement en cours' : 'Fermer ce workflow', textContent: '×', disabled: ws.running, onclick: (e) => { e.stopPropagation(); closeWs(ws); } }));
     tab.onclick = () => switchWs(ws);
     tab.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); switchWs(ws); } };
@@ -384,7 +394,7 @@ function viewAll() {                         // affiche l'espace actif en entier
   $('zip').hidden = !state.zipUrl; if (state.zipUrl) $('zip').href = state.zipUrl;
   render(); renderResults(); updateTabs();
 }
-function switchWs(ws) { if (ws === state) return; closeMenu(); state = ws; viewAll(); }
+function switchWs(ws) { if (ws === state) return; closeMenu(); state = ws; ws.unseen = false; viewAll(); }
 function addWs(from) {
   if (workspaces.length >= 8) { setHint(state, '8 workflows maximum.'); return; }
   const ws = makeWorkspace(null, from); workspaces.push(ws); switchWs(ws);
@@ -806,7 +816,7 @@ $('go').onclick = async () => {
   };
   await Promise.all([lane(), lane(), lane()]);
   if (batch) watchBatch(batch, ws);
-  ws.running = false; ws.run.tEnd = Date.now();       // temps total : génération + envois + traitements
+  ws.running = false; ws.run.tEnd = Date.now(); if (ws !== state) ws.unseen = true;       // temps total : génération + envois + traitements
   if (ws === state) { updateGo(); renderResults(); }
   updateTabs();
 };
