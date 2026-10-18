@@ -60,10 +60,13 @@ async function walk(dir, since, acc = []) {
   return acc;
 }
 
+// Windows : codex est un .cmd, il faut un shell, et Node déconseille shell + tableau d'arguments → une seule chaîne (arguments fixes)
+const WIN = process.platform === 'win32';
+const codexSpawn = (args, opts = {}) => (WIN ? spawn(`codex ${args.join(' ')}`, { ...opts, shell: true }) : spawn('codex', args, opts));
+const codexSync = (args) => (WIN ? spawnSync(`codex ${args.join(' ')}`, { encoding: 'utf8', shell: true }) : spawnSync('codex', args, { encoding: 'utf8' }));
 function runCodex(cwd, prompt) {
   return new Promise((resolve, reject) => {
-    // shell:true sous Windows (codex.cmd) ; aucun argument ne contient d'espace, le prompt passe par stdin
-    const p = spawn('codex', ['exec', '--skip-git-repo-check', '--ephemeral', '-s', 'workspace-write', '-'], { cwd, shell: process.platform === 'win32' });
+    const p = codexSpawn(['exec', '--skip-git-repo-check', '--ephemeral', '-s', 'workspace-write', '-'], { cwd });   // le prompt passe par stdin
     let tail = '';
     const keep = (d) => { tail = (tail + d).slice(-1500); };
     p.stdout.on('data', keep); p.stderr.on('data', keep);
@@ -77,7 +80,7 @@ function runCodex(cwd, prompt) {
 const chatgpt = {
   name: 'chatgpt',
   check() {
-    const r = spawnSync('codex', ['login', 'status'], { encoding: 'utf8', shell: process.platform === 'win32' });
+    const r = codexSync(['login', 'status']);
     if (r.error || r.status === null) return 'Codex CLI introuvable : npm i -g @openai/codex';
     const out = `${r.stdout}${r.stderr}`;
     if (!/logged in/i.test(out) || /not logged in/i.test(out)) return 'Codex n\'est pas connecté : lancez « codex login » et choisissez « Sign in with ChatGPT »';
