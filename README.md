@@ -108,23 +108,36 @@ Le nom d'une sortie est l'`id` du nœud (`main` = sortie principale). Cycles, id
 Les fichiers (source + sorties) des jobs terminés depuis plus de `RETENTION_DAYS` jours sont supprimés du stockage (toutes les 10 min, par lots de 100).
 La ligne du job reste (historique, logs). Un job `running` abandonné (worker disparu, tentatives épuisées) est clos en échec.
 
-## Génération d'images avec votre abonnement (pont local)
+## Générer une image (source d'entrée)
 
-L'étape « Génération d'image » se place en tête de la chaîne : prompt, format, 1 à 4 images, puis les étapes habituelles (redimensionner, convertir, compresser).
-**Aucune clé API, aucun jeton d'abonnement côté serveur** : un petit agent, `bridge/forge-bridge.mjs`, tourne sur *votre* ordinateur, déjà connecté à votre abonnement par le CLI officiel.
+Dans le bloc **Entrée**, à côté de « Mes fichiers », l'onglet **Générer une image** remplace le dépôt de fichiers : prompt, **pièces jointes de référence**
+(jusqu'à 4 images PNG/JPEG/WebP de 10 Mo, pour guider le résultat : produit, croquis, personnage, style…), format, 1 à 4 images.
+Les images produites passent ensuite dans la chaîne (redimensionner, convertir, compresser) comme n'importe quel fichier.
+
+Deux modes de connexion :
+
+**1. Abonnement ChatGPT (sans clé API) : pont local.** Un petit agent, `bridge/forge-bridge.mjs`, tourne sur *votre* ordinateur, connecté à votre abonnement par le CLI officiel.
+Aucun jeton d'abonnement ne quitte votre machine ; le serveur ne tient que la file des demandes.
 
 ```bash
 npm i -g @openai/codex && codex login          # « Sign in with ChatGPT »
 curl -O https://<votre-instance>/bridge/forge-bridge.mjs
-FORGE_KEY=<clé API> node forge-bridge.mjs --url https://<votre-instance>
+FORGE_KEY=<clé API MediaForge> node forge-bridge.mjs --url https://<votre-instance>
 ```
 
-- Le pont interroge le serveur (connexion sortante, rien à ouvrir), exécute `codex exec` avec l'outil de génération d'image, renvoie les images (conservées `RETENTION_DAYS` jours).
+- Le pont interroge le serveur (connexion sortante, rien à ouvrir), télécharge les pièces jointes, exécute `codex exec` (outil de génération d'image, références passées avec `-i`) et renvoie les images.
 - Il refuse de démarrer si Codex est connecté par clé API (la génération serait facturée) : seule la connexion ChatGPT est acceptée.
-- Chaque image peut prendre plusieurs minutes et consomme le quota du forfait. Usage personnel : n'exposez pas votre pont à d'autres, voir les [conditions « Sign in with ChatGPT »](https://openai.com/policies/sign-in-with-chatgpt-terms/).
+- Chaque image prend de 1 à 6 minutes et consomme le quota du forfait. Usage personnel : n'exposez pas votre pont à d'autres, voir les [conditions « Sign in with ChatGPT »](https://openai.com/policies/sign-in-with-chatgpt-terms/).
 - `--mock` : fournisseur de test (dégradé PNG) pour vérifier l'installation sans abonnement.
-- **Gemini** : non pris en charge, l'extension Nano Banana exige une clé API (pas de connexion par abonnement).
-- API : `POST /generations`, `GET /generations/:id` ; côté pont `/bridge/claim`, `/bridge/:id/results`, `/bridge/:id/fail`.
+
+**2. Clé API OpenAI : appel direct.** L'utilisateur saisit sa clé OpenAI dans l'interface (optionnellement mémorisée dans son navigateur) ; le serveur appelle l'API Images
+(`/images/generations`, ou `/images/edits` quand des pièces jointes sont fournies). La clé est utilisée pour cet appel puis oubliée : ni stockée, ni journalisée, masquée dans les messages d'erreur.
+Modèle par défaut `gpt-image-1` (champ « Modèle » pour en choisir un autre). Facturation à l'usage sur le compte OpenAI.
+Un administrateur peut fournir une clé partagée à toute l'instance avec `OPENAI_API_KEY` (voir `.env.example`) : les utilisateurs n'ont alors plus rien à saisir, mais chaque détenteur d'une clé MediaForge dépense ce crédit.
+
+- **Gemini** : non pris en charge, l'extension Nano Banana exige une clé API Google (pas de connexion par abonnement).
+- API : `POST /generations` (JSON ou multipart avec fichiers `ref`), `GET /generations/:id`, `GET /bridge/status` ; côté pont `/bridge/claim`, `/bridge/:id/results`, `/bridge/:id/fail`.
+- Les images (résultats et références) sont purgées après `RETENTION_DAYS` jours.
 
 ## Architecture
 
