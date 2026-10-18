@@ -99,6 +99,12 @@
   .opt.on { border-color:var(--accent); background:var(--surface); }
   .opt-h { display:flex; align-items:center; gap:9px; cursor:pointer; font-size:14px; }
   .opt > div:not(.opt-h) { margin-top:10px; }
+  .paneRow { display:flex; align-items:center; gap:10px; padding:0 16px 12px; }
+  .genpane { padding:2px 16px 16px; }
+  .txt { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:9px; background:var(--bg); font:inherit; color:inherit; }
+  .refs { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:8px; } .refs:empty { display:none; }
+  .ref { position:relative; } .ref .rm { position:absolute; top:-6px; right:-6px; width:22px; height:22px; border-radius:50%; background:var(--surface); border:1px solid var(--line); font-size:15px; }
+  .server-key { margin-top:10px; }
   .prompt { width:100%; padding:9px 11px; border:1px solid var(--line); border-radius:10px; background:var(--bg); resize:vertical; font:inherit; color:inherit; }
   .seg button:disabled { opacity:.5; cursor:not-allowed; }
   .bridge-pill { margin-top:12px; font-size:13px; padding:7px 11px; border-radius:9px; }
@@ -184,17 +190,23 @@
     <section class="node" id="inNode">
       <div class="head">
         <div class="badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 001 1h14a1 1 0 001-1v-3"/></svg></div>
-        <div><h3>Fichiers d'entrée</h3><div class="sub" id="inSub">Images, SVG ou vidéos</div></div>
-        <div class="tabs" id="kindTabs">
-          <button data-k="image" class="on">Image</button><button data-k="video">Vidéo</button>
+        <div><h3>Entrée</h3><div class="sub" id="inSub">Images, SVG ou vidéos</div></div>
+        <div class="tabs" id="srcTabs">
+          <button data-s="files" class="on">Mes fichiers</button><button data-s="generate">Générer une image</button>
         </div>
       </div>
-      <div class="drop" id="drop">
-        <div><b>Glissez-déposez vos fichiers ici</b></div>
-        <div>JPEG, PNG, WebP, AVIF, GIF, SVG · MP4, MOV, WebM, MKV</div>
-        <button id="pick" type="button">Parcourir…</button>
-        <input id="files" type="file" multiple hidden accept="image/*,video/*,.svg,.mkv,.mov">
+      <div id="filesPane">
+        <div class="paneRow"><span class="sub">Chaîne à régler :</span>
+          <div class="tabs" id="kindTabs" style="margin-left:0"><button data-k="image" class="on">Image</button><button data-k="video">Vidéo</button></div>
+        </div>
+        <div class="drop" id="drop">
+          <div><b>Glissez-déposez vos fichiers ici</b></div>
+          <div>JPEG, PNG, WebP, AVIF, GIF, SVG · MP4, MOV, WebM, MKV</div>
+          <button id="pick" type="button">Parcourir…</button>
+          <input id="files" type="file" multiple hidden accept="image/*,video/*,.svg,.mkv,.mov">
+        </div>
       </div>
+      <div id="genPane" class="genpane" hidden></div>
       <div class="files" id="fileList"></div>
     </section>
 
@@ -256,7 +268,6 @@ const ICON = {
   resize: '<path d="M4 14v6h6M20 10V4h-6M4 20l7-7M20 4l-7 7"/>',
   convert: '<path d="M4 8h13l-3-3M20 16H7l3 3"/>',
   compress: '<path d="M8 4v6l-4 0M16 4v6h4M8 20v-6H4M16 20v-6h4"/>',
-  generate: '<path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>',
   saved: '<path d="M5 4h11l3 3v13H5zM8 4v5h7V4M8 20v-6h8v6"/>',
 };
 const svg = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICON[name]}</svg>`;
@@ -272,16 +283,15 @@ document.addEventListener('click', (e) => {
 
 /* ───────── État : une chaîne par type de média ───────── */
 let uid = 0;
-const state = { kind: 'image', chains: { image: [], video: [] }, files: [], saved: [] };
+const state = { kind: 'image', chains: { image: [], video: [] }, files: [], saved: [], source: 'files',
+  gen: { auth: 'subscription', prompt: '', count: 1, aspect: '1:1', refs: [], apiKey: store.get('mf_openai'), remember: !!store.get('mf_openai'), model: '' } };
 
 const STEP_DEFS = {
-  generate: { title: 'Génération d’image', desc: 'Créer l’image avec votre abonnement ChatGPT', max: 1, imageOnly: true },
   resize:   { title: 'Redimensionner', desc: 'Limiter les dimensions (sans jamais agrandir)', max: 1 },
   convert:  { title: 'Convertir',      desc: 'Changer de format ou de codec', max: 1 },
   compress: { title: 'Compresser',     desc: 'Alléger en préservant la qualité visuelle', max: 1 },
 };
 const defaults = (type, kind) => ({
-  generate: { provider: 'chatgpt', prompt: '', count: 1, aspect: '1:1' },
   resize: kind === 'video' ? { maxHeight: 1080 } : { width: 1600, height: '' },
   convert: { to: kind === 'video' ? 'h264' : 'webp' },
   compress: { useQuality: true, ssim: 0.97, useLevel: false, level: 50, useSize: false, maxKB: kind === 'video' ? 20000 : 250, strict: false },
@@ -371,29 +381,6 @@ function stepBody(s, kind) {
   const video = kind === 'video';
   const body = el('div', { className: 'body' });
   const rerender = () => render();
-  if (s.type === 'generate') {
-    const prov = seg([['chatgpt', 'ChatGPT', 'via votre abonnement']], s.provider, () => {});
-    prov.append(el('button', { type: 'button', disabled: true, title: 'L’extension Gemini (Nano Banana) exige une clé API : pas de connexion par abonnement pour l’instant' }, 'Gemini', el('small', { textContent: 'indisponible' })));
-    const prompt = el('textarea', { className: 'prompt', rows: 3, maxLength: 4000, placeholder: 'Décrivez l’image à générer…', value: s.prompt });
-    prompt.addEventListener('input', () => { s.prompt = prompt.value; updateGo(); });
-    const pill = el('div', { className: 'bridge-pill off' });
-    body.append(
-      el('div', { className: 'f' }, el('label', { className: 'l', textContent: 'Service' }), prov),
-      el('div', { className: 'f', style: 'margin-top:12px' }, el('label', { className: 'l', textContent: 'Description (prompt)' }), prompt),
-      el('div', { className: 'grid', style: 'margin-top:12px' },
-        el('div', { className: 'f' }, el('label', { className: 'l', textContent: 'Format' }), seg([['1:1', 'Carré'], ['3:2', 'Paysage'], ['2:3', 'Portrait'], ['16:9', 'Large']], s.aspect, (v) => { s.aspect = v; rerender(); })),
-        el('div', { className: 'f' }, el('label', { className: 'l', textContent: 'Nombre d’images' }), seg([[1, '1'], [2, '2'], [3, '3'], [4, '4']], s.count, (v) => { s.count = v; rerender(); }))),
-      pill);
-    const how = el('details', { className: 'how' }, el('summary', { textContent: 'Comment connecter mon abonnement ChatGPT ?' }));
-    how.append(el('ol', {},
-      el('li', {}, 'Installez Node.js 18+ et le CLI officiel : ', el('code', { textContent: 'npm i -g @openai/codex' })),
-      el('li', {}, 'Connectez votre abonnement : ', el('code', { textContent: 'codex login' }), ' puis « Sign in with ChatGPT »'),
-      el('li', {}, 'Téléchargez le pont : ', el('a', { href: '/bridge/forge-bridge.mjs', download: 'forge-bridge.mjs', textContent: 'forge-bridge.mjs' })),
-      el('li', {}, 'Lancez-le sur votre ordinateur : ', el('code', { textContent: 'FORGE_KEY=<clé API> node forge-bridge.mjs --url ' + location.origin }), ' (PowerShell : ', el('code', { textContent: '$env:FORGE_KEY="<clé API>"; node forge-bridge.mjs --url ' + location.origin }), ')')),
-      el('p', { className: 'hint', textContent: 'Votre abonnement reste sur votre machine : le serveur ne reçoit que la demande et l’image produite. Chaque image peut prendre plusieurs minutes et consomme le quota de votre forfait. Usage personnel uniquement.' }));
-    body.append(how);
-    refreshBridge();
-  }
   if (s.type === 'resize') {
     if (video) {
       body.append(el('div', { className: 'f' }, el('label', { className: 'l', textContent: 'Hauteur maximale' }),
@@ -446,21 +433,94 @@ function stepBody(s, kind) {
   return body;
 }
 
-let bridgeOnline = null;
+let bridgeOnline = null, serverKey = false;
 async function refreshBridge() {
-  try { const r = await api('/bridge/status'); if (r.ok) bridgeOnline = (await r.json()).online.includes('chatgpt'); } catch { bridgeOnline = null; }
+  try { const r = await api('/bridge/status'); if (r.ok) { const j = await r.json(); bridgeOnline = j.online.includes('chatgpt'); serverKey = !!j.server_api_key; } } catch { bridgeOnline = null; }
   document.querySelectorAll('.bridge-pill').forEach((p) => {
     p.className = 'bridge-pill ' + (bridgeOnline ? 'on' : 'off');
-    p.textContent = bridgeOnline ? '● Pont connecté : ChatGPT disponible' : bridgeOnline === false ? '● Aucun pont connecté : lancez forge-bridge sur votre ordinateur (voir ci-dessous)' : '● État du pont inconnu';
+    p.textContent = bridgeOnline ? '● Pont connecté : abonnement ChatGPT disponible' : bridgeOnline === false ? '● Aucun pont connecté : lancez forge-bridge sur votre ordinateur (voir ci-dessous)' : '● État du pont inconnu';
   });
+  const hint = document.querySelector('#genPane .server-key'); if (hint) hint.hidden = !serverKey;
 }
 setInterval(() => document.querySelector('.bridge-pill') && refreshBridge(), 10000);
-const genStep = () => state.chains.image.find((x) => x.type === 'generate');
-const canGenerate = () => { const g = genStep(); return !!g && g.prompt.trim().length >= 3; };
-function updateGo() { if (!running) $('go').disabled = !state.files.length && !canGenerate(); }
+const canGenerate = () => state.source === 'generate' && state.gen.prompt.trim().length >= 3 && (state.gen.auth === 'subscription' || state.gen.apiKey.trim() || serverKey);
+function updateGo() { if (!running) $('go').disabled = state.source === 'generate' ? !canGenerate() : !state.files.length; }
+
+const REF_OK = /^image\/(png|jpeg|webp)$/;
+function addRefs(list) {
+  const g = state.gen, msgs = [];
+  for (const file of list) {
+    if (!REF_OK.test(file.type)) { msgs.push(file.name + ' : PNG, JPEG ou WebP uniquement'); continue; }
+    if (file.size > 10 * 1048576) { msgs.push(file.name + ' : plus de 10 Mo'); continue; }
+    if (g.refs.length >= 4) { msgs.push('4 pièces jointes maximum'); break; }
+    g.refs.push({ id: ++uid, file, url: URL.createObjectURL(file) });
+  }
+  renderGenPane();
+  if (msgs.length) $('goHint').textContent = msgs.join(' · ');
+}
+
+function renderGenPane() {
+  const g = state.gen, pane = $('genPane');
+  const auth = seg([['subscription', 'Abonnement ChatGPT', 'recommandé : sans clé API'], ['api', 'Clé API OpenAI', 'facturé à l’usage']], g.auth, (v) => { g.auth = v; renderGenPane(); updateGo(); });
+  auth.append(el('button', { type: 'button', disabled: true, title: 'L’extension Gemini (Nano Banana) exige une clé API Google : pas de connexion par abonnement pour l’instant' }, 'Gemini', el('small', { textContent: 'indisponible' })));
+
+  const conn = el('div', { className: 'opt on', style: 'margin-top:10px' });
+  if (g.auth === 'subscription') {
+    const how = el('details', { className: 'how' }, el('summary', { textContent: 'Comment connecter mon abonnement ChatGPT ?' }));
+    how.append(el('ol', {},
+      el('li', {}, 'Installez Node.js 18+ et le CLI officiel : ', el('code', { textContent: 'npm i -g @openai/codex' })),
+      el('li', {}, 'Connectez votre abonnement : ', el('code', { textContent: 'codex login' }), ' puis « Sign in with ChatGPT »'),
+      el('li', {}, 'Téléchargez le pont : ', el('a', { href: '/bridge/forge-bridge.mjs', download: 'forge-bridge.mjs', textContent: 'forge-bridge.mjs' })),
+      el('li', {}, 'Lancez-le sur votre ordinateur : ', el('code', { textContent: 'FORGE_KEY=<clé API MediaForge> node forge-bridge.mjs --url ' + location.origin }), ' (PowerShell : ', el('code', { textContent: '$env:FORGE_KEY="<clé API MediaForge>"; node forge-bridge.mjs --url ' + location.origin }), ')')),
+      el('p', { className: 'hint', textContent: 'Votre abonnement reste sur votre machine : le serveur ne reçoit que la demande et l’image produite. Chaque image peut prendre plusieurs minutes et consomme le quota de votre forfait. Usage personnel uniquement.' }));
+    conn.append(el('div', { className: 'bridge-pill off', style: 'margin-top:0' }), how);
+  } else {
+    const key = el('input', { type: 'password', autocomplete: 'off', placeholder: 'sk-…', value: g.apiKey, className: 'txt' });
+    key.addEventListener('input', () => { g.apiKey = key.value; updateGo(); });
+    const rem = el('input', { type: 'checkbox', checked: g.remember }); rem.onchange = () => { g.remember = rem.checked; };
+    const model = el('input', { type: 'text', placeholder: 'gpt-image-1 (par défaut)', value: g.model, className: 'txt' });
+    model.addEventListener('input', () => { g.model = model.value; });
+    conn.append(
+      el('div', { className: 'grid' }, el('div', { className: 'f' }, el('label', { className: 'l', textContent: 'Clé API OpenAI' }), key), el('div', { className: 'f' }, el('label', { className: 'l', textContent: 'Modèle (optionnel)' }), model)),
+      el('div', { className: 'server-key bridge-pill on', hidden: !serverKey, textContent: '● Une clé est configurée sur ce serveur : vous pouvez laisser le champ vide.' }),
+      el('label', { className: 'chk' }, rem, 'Mémoriser la clé dans ce navigateur'),
+      el('p', { className: 'hint', textContent: 'La clé est envoyée à votre serveur MediaForge (HTTPS), utilisée pour cet appel puis oubliée : elle n’est ni stockée ni journalisée côté serveur. Facturation à l’usage sur votre compte OpenAI.' }));
+  }
+
+  const prompt = el('textarea', { className: 'prompt', rows: 3, maxLength: 4000, placeholder: 'Décrivez l’image à générer…', value: g.prompt });
+  prompt.addEventListener('input', () => { g.prompt = prompt.value; updateGo(); });
+
+  const refsBox = el('div', { className: 'refs' }, ...g.refs.map((r) => {
+    const t = el('div', { className: 'thumb lg', title: r.file.name }); t.style.backgroundImage = `url("${r.url}")`;
+    return el('div', { className: 'ref' }, t, el('button', { className: 'rm', type: 'button', title: 'Retirer', textContent: '×', onclick: () => { URL.revokeObjectURL(r.url); g.refs = g.refs.filter((x) => x !== r); renderGenPane(); } }));
+  }));
+  const picker = el('input', { type: 'file', multiple: true, hidden: true, accept: 'image/png,image/jpeg,image/webp' });
+  picker.onchange = () => { addRefs(picker.files); picker.value = ''; };
+  const add = el('button', { className: 'ghost', type: 'button', textContent: g.refs.length ? '+ Ajouter une autre image' : '+ Ajouter une image de référence', onclick: () => picker.click() });
+  add.disabled = g.refs.length >= 4;
+
+  pane.replaceChildren(
+    el('div', { className: 'f' }, el('label', { className: 'l', textContent: 'Connexion' }), auth), conn,
+    el('div', { className: 'f', style: 'margin-top:14px' }, el('label', { className: 'l', textContent: 'Description (prompt)' }), prompt),
+    el('div', { className: 'f', style: 'margin-top:12px' }, el('label', { className: 'l', textContent: 'Pièces jointes pour guider la génération (optionnel, 4 max · PNG, JPEG, WebP · 10 Mo)' }), refsBox, add, picker,
+      el('div', { className: 'hint', textContent: 'Photo de produit, croquis, personnage, style à imiter… vous pouvez aussi glisser-déposer les images ici.' })),
+    el('div', { className: 'grid', style: 'margin-top:14px' },
+      el('div', { className: 'f' }, el('label', { className: 'l', textContent: 'Format' }), seg([['1:1', 'Carré'], ['3:2', 'Paysage'], ['2:3', 'Portrait'], ['16:9', 'Large']], g.aspect, (v) => { g.aspect = v; renderGenPane(); })),
+      el('div', { className: 'f' }, el('label', { className: 'l', textContent: 'Nombre d’images' }), seg([[1, '1'], [2, '2'], [3, '3'], [4, '4']], g.count, (v) => { g.count = v; renderGenPane(); }))),
+    el('div', { className: 'hint', textContent: 'Les images générées sont ajoutées à la liste puis traitées par la chaîne ci-dessous (redimensionner, convertir, compresser).' }));
+  refreshBridge();
+}
+
+function renderSource() {
+  const gen = state.source === 'generate';
+  document.querySelectorAll('#srcTabs button').forEach((b) => b.classList.toggle('on', b.dataset.s === state.source));
+  $('filesPane').hidden = gen; $('genPane').hidden = !gen;
+  if (!running) $('go').textContent = gen ? 'Générer puis traiter' : 'Lancer le traitement';
+  if (gen) { state.kind = 'image'; renderGenPane(); }
+}
+$('srcTabs').onclick = (e) => { const v = e.target.dataset?.s; if (v && v !== state.source) { state.source = v; render(); } };
 
 function summary(s, kind) {
-  if (s.type === 'generate') return `ChatGPT · ${s.count} image${s.count > 1 ? 's' : ''} · ${s.aspect}${s.prompt ? ' · « ' + s.prompt.slice(0, 40) + (s.prompt.length > 40 ? '…' : '') + ' »' : ''}`;
   if (s.type === 'resize') return kind === 'video' ? `Hauteur max ${s.maxHeight} px` : `Max ${s.width || '—'}${s.height ? ' × ' + s.height : ''} px`;
   if (s.type === 'convert') return ({ h264: 'MP4 (H.264)', av1: 'AV1', vp9: 'VP9', '': 'Format conservé' }[s.to] ?? s.to.toUpperCase());
   if (s.type === 'compress') return [s.useQuality && `Fidélité ≥ ${s.ssim}`, s.useLevel && `Compression ${s.level} %`, s.useSize && `≤ ${s.maxKB} Ko`].filter(Boolean).join(' · ');
@@ -472,11 +532,11 @@ function addMenu(anchor, kind) {
   menuFor = anchor;
   const used = new Set(state.chains[kind].map((s) => s.type));
   const menu = el('div', { className: 'menu' });
-  Object.entries(STEP_DEFS).filter(([, d]) => !(d.imageOnly && kind === 'video')).forEach(([type, d]) => {
+  Object.entries(STEP_DEFS).forEach(([type, d]) => {
     const b = el('button', { type: 'button', disabled: used.has(type) });
     b.innerHTML = `<span class="badge">${svg(type)}</span>`;
     b.append(el('span', {}, d.title, el('small', { textContent: used.has(type) ? 'Déjà dans la chaîne' : d.desc })));
-    b.onclick = (e) => { e.stopPropagation(); state.chains[kind][type === 'generate' ? 'unshift' : 'push'](mk(type, kind)); closeMenu(); render(); };
+    b.onclick = (e) => { e.stopPropagation(); state.chains[kind].push(mk(type, kind)); closeMenu(); render(); };
     menu.append(b);
   });
   anchor.parentElement.append(menu);
@@ -490,6 +550,7 @@ function linkEl(kind) {
 }
 
 function render() {
+  renderSource();
   const kind = state.kind, chain = state.chains[kind];
   closeMenu();
   document.querySelectorAll('#kindTabs button').forEach((b) => b.classList.toggle('on', b.dataset.k === kind));
@@ -506,7 +567,7 @@ function render() {
   if (!chain.length) wrap.querySelector('.link').after(el('div', { className: 'empty', textContent: `Aucune étape : ajoutez-en une ou choisissez un préréglage ${kind === 'video' ? 'vidéo' : 'image'}.` }), el('div', { className: 'link' }));
   const notes = [];
   if (chain.filter((s) => ['convert', 'compress', 'resize'].includes(s.type)).length > 1) notes.push('Redimensionnement, conversion et compression sont fusionnés en un seul encodage : le fichier n\'est jamais dégradé deux fois.');
-  $('goHint').textContent = !state.files.length && !genStep() ? 'Ajoutez des fichiers pour commencer.' : !state.files.length && !canGenerate() ? 'Décrivez l’image à générer pour commencer.' : '';
+  $('goHint').textContent = state.source === 'files' && !state.files.length ? 'Ajoutez des fichiers pour commencer.' : state.source === 'generate' && !canGenerate() ? 'Décrivez l’image à générer pour commencer.' : '';
   renderPresets(); renderFiles();
   updateGo();
   const old = $('stepsWrap').querySelector('.fuse'); old?.remove();
@@ -529,11 +590,12 @@ const typeLabel = (f) => (f.name.match(/\.([a-z0-9]+)$/i)?.[1] || f.type.split('
 function addFiles(list) {
   const accepted = [...list].filter((f) => kindOf(f));
   const skipped = list.length - accepted.length;
-  accepted.forEach((file) => state.files.push({ id: ++uid, file, kind: kindOf(file), url: URL.createObjectURL(file), phase: 'ready' }));
+  const added = accepted.map((file) => { const f = { id: ++uid, file, kind: kindOf(file), url: URL.createObjectURL(file), phase: 'ready' }; state.files.push(f); return f; });
   // l'onglet suit le type déposé (un dépôt mixte garde l'onglet courant ; les deux chaînes sont envoyées au moteur)
   if (accepted.length && accepted.every((f) => kindOf(f) === kindOf(accepted[0]))) state.kind = kindOf(accepted[0]);
   if (skipped) $('goHint').textContent = `${skipped} fichier(s) ignoré(s) : type non pris en charge.`;
   render();
+  return added;
 }
 
 function thumbEl(f, big) {
@@ -568,8 +630,8 @@ drop.onclick = (e) => { if (e.target === drop) $('files').click(); };
 $('files').onchange = (e) => { addFiles(e.target.files); e.target.value = ''; };
 ['dragenter', 'dragover'].forEach((ev) => window.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); }));
 ['dragleave', 'drop'].forEach((ev) => window.addEventListener(ev, (e) => { e.preventDefault(); if (ev === 'drop' || !e.relatedTarget) drop.classList.remove('over'); }));
-window.addEventListener('drop', (e) => { if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files); });
-window.addEventListener('paste', (e) => { if (e.clipboardData?.files?.length) addFiles(e.clipboardData.files); });
+window.addEventListener('drop', (e) => { if (e.dataTransfer?.files?.length) (state.source === 'generate' ? addRefs : addFiles)(e.dataTransfer.files); });
+window.addEventListener('paste', (e) => { if (e.clipboardData?.files?.length) (state.source === 'generate' ? addRefs : addFiles)(e.clipboardData.files); });
 $('kindTabs').onclick = (e) => { const k = e.target.dataset?.k; if (k) { state.kind = k; render(); } };
 
 /* ───────── Exécution ───────── */
@@ -595,15 +657,16 @@ async function ensureWorkflow() {
 
 let running = false;
 $('go').onclick = async () => {
-  if (running || (!state.files.length && !canGenerate())) return;
+  if (running || $('go').disabled) return;
   running = true; $('go').disabled = true; $('zip').hidden = true; $('goHint').textContent = '';
   let wf;
   try { wf = await ensureWorkflow(); } catch (e) { $('goHint').textContent = e.message; running = false; updateGo(); return; }
-  if (canGenerate()) {
-    try { await generateImages(genStep()); }
+  let generated = null;
+  if (state.source === 'generate') {
+    try { generated = await generateImages(); }
     catch (e) { $('goHint').textContent = e.message; running = false; updateGo(); return; }
   }
-  const todo = state.files.filter((f) => f.phase !== 'busy');
+  const todo = generated ?? state.files.filter((f) => f.phase !== 'busy');
   todo.forEach((f) => Object.assign(f, { phase: 'busy', pct: 0, status: 'Envoi…', out: null, error: null }));
   renderResults();
   let batch = '';
@@ -624,16 +687,25 @@ $('go').onclick = async () => {
   running = false; updateGo(); renderResults();
 };
 
-// Génération via le pont local : la demande attend qu'un pont connecté la réserve, puis les images arrivent comme des fichiers d'entrée.
-async function generateImages(g) {
-  const r = await api('/generations', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ provider: g.provider, prompt: g.prompt, count: g.count, aspect: g.aspect }) });
-  if (r.status === 401) { $('keybox').hidden = false; throw new Error('Clé API invalide : saisissez-la en haut à droite.'); }
+// Génération : abonnement (pont local) ou clé API ; les images produites deviennent des fichiers d'entrée
+async function generateImages() {
+  const g = state.gen, viaApi = g.auth === 'api';
+  const fd = new FormData();
+  fd.append('provider', viaApi ? 'openai-api' : 'chatgpt'); fd.append('prompt', g.prompt.trim()); fd.append('count', String(g.count)); fd.append('aspect', g.aspect);
+  if (viaApi) {
+    if (g.apiKey.trim()) fd.append('apiKey', g.apiKey.trim());
+    if (g.model.trim()) fd.append('model', g.model.trim());
+    store.set('mf_openai', g.remember ? g.apiKey.trim() : '');
+  }
+  g.refs.forEach((r) => fd.append('ref', r.file));
+  const r = await api('/generations', { method: 'POST', body: fd });
+  if (r.status === 401) { $('keybox').hidden = false; throw new Error('Clé API MediaForge invalide : saisissez-la en haut à droite.'); }
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'génération refusée');
   const { id } = await r.json();
-  const t0 = Date.now();
+  const t0 = Date.now(), label = viaApi ? 'l’API OpenAI' : 'ChatGPT';
   for (;;) {
     const sec = Math.round((Date.now() - t0) / 1000);
-    $('goHint').textContent = `Génération en cours via ChatGPT… ${Math.floor(sec / 60)} min ${String(sec % 60).padStart(2, '0')} s (compter plusieurs minutes par image)`;
+    $('goHint').textContent = `Génération en cours via ${label}… ${Math.floor(sec / 60)} min ${String(sec % 60).padStart(2, '0')} s${viaApi ? '' : ' (compter plusieurs minutes par image)'}`;
     const j = await (await api('/generations/' + id)).json().catch(() => null);
     if (j?.status === 'failed') throw new Error('Génération échouée : ' + (j.error || 'erreur inconnue'));
     if (j?.status === 'done') {
@@ -643,10 +715,9 @@ async function generateImages(g) {
         files.push(new File([blob], `generation-${id.slice(0, 6)}-${o.index + 1}.${blob.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png'}`, { type: blob.type }));
       }
       $('goHint').textContent = '';
-      state.kind = 'image'; addFiles(files);
-      return;
+      return addFiles(files);
     }
-    if (Date.now() - t0 > 25 * 60_000) throw new Error('Délai dépassé : le pont n\'a pas répondu (est-il toujours lancé ?).');
+    if (Date.now() - t0 > 25 * 60_000) throw new Error(viaApi ? 'Délai dépassé.' : 'Délai dépassé : le pont n’a pas répondu (est-il toujours lancé ?).');
     await new Promise((res) => setTimeout(res, 3000));
   }
 }
@@ -745,14 +816,14 @@ async function loadSaved() {
   renderPresets(); renderLibrary();
 }
 function useSaved(p) {
-  for (const k of ['image', 'video']) state.chains[k] = (p.ui[k] || []).filter((s) => s.type !== 'thumb').map((s) => migrate({ ...s, id: ++uid }, k));
+  for (const k of ['image', 'video']) state.chains[k] = (p.ui[k] || []).filter((s) => !['thumb', 'generate'].includes(s.type)).map((s) => migrate({ ...s, id: ++uid }, k));
   if (!state.chains[state.kind].length) state.kind = state.chains.image.length ? 'image' : 'video';
   if ($('libDlg').open) $('libDlg').close();
   render();
 }
 function chainText(p) {
   const part = (k, label) => {
-    const st = (p.ui[k] || []).filter((s) => s.type !== 'thumb');
+    const st = (p.ui[k] || []).filter((s) => !['thumb', 'generate'].includes(s.type));
     return st.length ? `${label} : ` + st.map((s) => `${STEP_DEFS[s.type]?.title} (${summary(migrate({ ...s }, k), k)})`).join(' → ') : '';
   };
   return [part('image', 'Image'), part('video', 'Vidéo')].filter(Boolean).join('\n') || 'Chaîne vide';

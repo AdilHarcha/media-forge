@@ -15,7 +15,7 @@
  * Options : --url <url> · --name <nom du pont> · --mock (fournisseur de test, sans abonnement) · --once (une demande puis sortie)
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir, hostname, homedir } from 'node:os';
 import { join, extname } from 'node:path';
 import { deflateSync } from 'node:zlib';
@@ -62,11 +62,13 @@ async function walk(dir, since, acc = []) {
 
 // Windows : codex est un .cmd, il faut un shell, et Node déconseille shell + tableau d'arguments → une seule chaîne (arguments fixes)
 const WIN = process.platform === 'win32';
-const codexSpawn = (args, opts = {}) => (WIN ? spawn(`codex ${args.join(' ')}`, { ...opts, shell: true }) : spawn('codex', args, opts));
+const q = (a) => (/[s&|<>^]/.test(a) ? `"${a}"` : a);   // chemins avec espaces
+const codexSpawn = (args, opts = {}) => (WIN ? spawn(`codex ${args.map(q).join(' ')}`, { ...opts, shell: true }) : spawn('codex', args, opts));
 const codexSync = (args) => (WIN ? spawnSync(`codex ${args.join(' ')}`, { encoding: 'utf8', shell: true }) : spawnSync('codex', args, { encoding: 'utf8' }));
-function runCodex(cwd, prompt) {
+function runCodex(cwd, prompt, refPaths = []) {
   return new Promise((resolve, reject) => {
-    const p = codexSpawn(['exec', '--skip-git-repo-check', '--ephemeral', '-s', 'workspace-write', '-'], { cwd });   // le prompt passe par stdin
+    // -i (images de référence) en tête, suivi d'une option : la liste de fichiers de -i ne doit pas avaler le « - » final
+    const p = codexSpawn(['exec', ...refPaths.flatMap((f) => ['-i', f]), '--skip-git-repo-check', '--ephemeral', '-s', 'workspace-write', '-'], { cwd });   // le prompt passe par stdin
     let tail = '';
     const keep = (d) => { tail = (tail + d).slice(-1500); };
     p.stdout.on('data', keep); p.stderr.on('data', keep);
@@ -87,7 +89,7 @@ const chatgpt = {
     if (!/chatgpt/i.test(out)) return 'Codex est connecté par clé API, pas par ChatGPT : refaites « codex login » avec votre compte ChatGPT (sinon la génération serait facturée à l\'API)';
     return null;
   },
-  async generate({ prompt, aspect }) {
+  async generate({ prompt, aspect, refPaths = [] }) {
     const dir = await mkdtemp(join(tmpdir(), 'forge-gen-'));
     const since = Date.now() - 1000;
     try {
@@ -96,8 +98,9 @@ const chatgpt = {
         `Aspect ratio: ${ASPECT_TEXT[aspect] ?? 'square (1:1)'}.`,
         'When it is done, make sure the resulting image file is saved in the current directory as out.png (copy it there if the tool stored it elsewhere).',
         'Do nothing else: no other files, no explanations.',
+        ...(refPaths.length ? ['The attached image(s) are reference material: use them as guidance (subject, style, composition) for the new image.'] : []),
         '', 'Description:', prompt,
-      ].join('\n'));
+      ].join('\n'), refPaths);
       const found = [...await walk(dir, since), ...await walk(join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'generated_images'), since)];
       if (!found.length) throw new Error('Codex a terminé sans produire d\'image (outil de génération indisponible ou quota atteint ?)');
       found.sort((a, b) => (b.path.endsWith('out.png') - a.path.endsWith('out.png')) || b.mtime - a.mtime);
@@ -136,11 +139,22 @@ for (const s of ['SIGINT', 'SIGTERM']) process.on(s, () => { stop = true; log('a
 async function handle(g) {
   log(`demande ${g.id.slice(0, 8)} : ${g.count} image(s), ${g.aspect} — « ${g.prompt.slice(0, 70)} »`);
   const beat = setInterval(ping, 20_000);                 // reste « connecté » pendant les longues générations
+  const refDir = await mkdtemp(join(tmpdir(), 'forge-ref-'));
   try {
+    const refPaths = [];
+    for (const [i, path] of (g.refs ?? []).entries()) {       // images de référence jointes par l'utilisateur
+      const r = await call(path);
+      if (!r.ok) throw new Error(`référence ${i + 1} introuvable (${r.status})`);
+      const type = r.headers.get('content-type') || 'image/png';
+      const file = join(refDir, `ref${i + 1}.${type.includes('jpeg') ? 'jpg' : type.includes('webp') ? 'webp' : 'png'}`);
+      await writeFile(file, Buffer.from(await r.arrayBuffer()));
+      refPaths.push(file);
+    }
+    if (refPaths.length) log(`  ${refPaths.length} référence(s) jointe(s)`);
     const form = new FormData();
     for (let i = 1; i <= g.count; i++) {
       log(`  génération ${i}/${g.count}…`);
-      const { buf, mime } = await provider.generate(g);
+      const { buf, mime } = await provider.generate({ ...g, refPaths });
       form.append('file', new Blob([buf], { type: mime }), `image-${i}.${mime.split('/')[1].replace('jpeg', 'jpg')}`);
     }
     const r = await call(`/bridge/${g.id}/results`, { method: 'POST', body: form });
@@ -149,7 +163,7 @@ async function handle(g) {
   } catch (e) {
     log(`  ✗ ${e.message}`);
     await json(`/bridge/${g.id}/fail`, { error: e.message }).catch(() => {});
-  } finally { clearInterval(beat); }
+  } finally { clearInterval(beat); await rm(refDir, { recursive: true, force: true }).catch(() => {}); }
 }
 
 while (!stop) {
