@@ -44,7 +44,9 @@ const encoders = {
  *  - strict          : échoue si un objectif n'est pas atteint (sinon avertissement + meilleur résultat)
  * Si minSsim et maxBytes entrent en conflit, la qualité l'emporte.
  */
-async function encodeImage(input, { format, quality = 80, minQuality = 40, minSsim, maxBytes, qualityStep = 5, strict = false, width, height, fit = 'inside' }, dir) {
+async function encodeImage(input, params, dir) {
+  const { format, quality = 80, minQuality = 40, minSsim, maxBytes, qualityStep = 5, strict = false, width, height, fit = 'inside' } = params;
+  const levelQ = params.quality;          // qualité demandée explicitement (niveau de compression), sinon undefined
   if (!encoders[format]) throw new Error(`format image inconnu: ${format}`);
   const base = () => {
     let img = sharp(input, input.endsWith('.svg') ? { density: 192 } : undefined).rotate();
@@ -76,6 +78,8 @@ async function encodeImage(input, { format, quality = 80, minQuality = 40, minSs
       if (r.ssim >= minSsim) { best = r; hi = mid - 1; } else lo = mid + 1;
     }
     if (!best) { best = await attempt(100); warnings.push(`SSIM ${minSsim} non atteint même à q=100 (${best.ssim.toFixed(4)})`); }
+    // niveau de compression + fidélité : le niveau demandé s'applique tant qu'il respecte la fidélité (sinon on compresse moins)
+    else if (levelQ != null && best.q < levelQ) best = await attempt(levelQ);
     if (maxBytes && best.size > maxBytes) warnings.push(`poids ${best.size} > objectif ${maxBytes} (la qualité prime)`);
   } else {
     let q = quality;
@@ -202,7 +206,9 @@ async function scoreVideo(distorted, original, start, len, vf, useVmaf) {
  *  - maxBytes (sans cible qualité)   : débit calculé depuis la durée
  *  - crf                             : réglage direct
  */
-async function transcodeVideo(input, { codec = 'h264', crf = 26, maxHeight = 1080, preset = 'medium', maxBytes, minVmaf, minSsim, strict = false }, dir) {
+async function transcodeVideo(input, params, dir) {
+  let { codec = 'h264', crf = 26, maxHeight = 1080, preset = 'medium', maxBytes, minVmaf, minSsim, strict = false } = params;
+  const levelCrf = params.crf;            // CRF demandé explicitement (niveau de compression), sinon undefined
   const cfg = CODECS(preset)[codec];
   if (!cfg) throw new Error(`codec inconnu: ${codec}`);
   const vf = `scale=-2:'min(${maxHeight},ih)'`;
@@ -228,7 +234,7 @@ async function transcodeVideo(input, { codec = 'h264', crf = 26, maxHeight = 108
       const score = await sample(mid);
       if (score >= target) { chosen = mid; lo = mid + 1; } else hi = mid - 1;
     }
-    crf = chosen;
+    crf = levelCrf != null ? Math.min(chosen, levelCrf) : chosen;   // fidélité d’abord
     rate = cfg.crf(crf);
     mode = `${useVmaf ? 'vmaf' : 'ssim'}≥${target} → crf ${crf}`;
   } else if (maxBytes) {

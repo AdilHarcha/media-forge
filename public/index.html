@@ -95,6 +95,10 @@
   .sub-h { font-size:12.5px; color:var(--muted); margin:14px 0 6px; }
   .range { width:100%; accent-color:var(--accent); }
   .row { display:flex; align-items:center; gap:10px; }
+  .opt { border:1px solid var(--line); border-radius:12px; padding:10px 12px; margin-top:10px; background:var(--bg); }
+  .opt.on { border-color:var(--accent); background:var(--surface); }
+  .opt-h { display:flex; align-items:center; gap:9px; cursor:pointer; font-size:14px; }
+  .opt > div:not(.opt-h) { margin-top:10px; }
   .pct { display:flex; align-items:center; gap:5px; } .pct input { width:78px; padding:7px 9px; border:1px solid var(--line); border-radius:9px; background:var(--bg); }
   .chk { display:flex; align-items:center; gap:8px; font-size:13.5px; margin-top:12px; }
   .note { font-size:12.5px; color:var(--muted); background:var(--soft); border-radius:10px; padding:9px 12px; margin-top:12px; }
@@ -269,13 +273,15 @@ const STEP_DEFS = {
 const defaults = (type, kind) => ({
   resize: kind === 'video' ? { maxHeight: 1080 } : { width: 1600, height: '' },
   convert: { to: kind === 'video' ? 'h264' : 'webp' },
-  compress: { mode: 'quality', ssim: 0.97, maxKB: kind === 'video' ? 20000 : 250, level: 50, strict: false },
+  compress: { useQuality: true, ssim: 0.97, useLevel: false, level: 50, useSize: false, maxKB: kind === 'video' ? 20000 : 250, strict: false },
 }[type]);
-const migrate = (s, kind) => {          // anciens préréglages : « manuel » devenu « niveau »
-  if (s.type === 'compress' && s.mode === 'manual') { s.mode = 'level'; s.level = kind === 'video' ? Math.round(((s.crf ?? 26) - 18) * 99 / 16 + 1) : 101 - (s.quality ?? 80); }
+const migrate = (s, kind) => {          // anciens préréglages : un seul « mode » → options combinables
+  if (s.type !== 'compress') return s;
+  if (s.mode === 'manual') { s.mode = 'level'; s.level = kind === 'video' ? Math.round(((s.crf ?? 26) - 18) * 99 / 16 + 1) : 101 - (s.quality ?? 80); }
+  if (s.mode) { s.useQuality = s.mode === 'quality'; s.useLevel = s.mode === 'level'; s.useSize = s.mode === 'size'; delete s.mode; }
   return s;
 };
-const mk = (type, kind, over = {}) => ({ id: ++uid, type, ...defaults(type, kind), ...over });
+const mk = (type, kind, over = {}) => migrate({ id: ++uid, type, ...defaults(type, kind), ...over }, kind);
 
 const PRESETS = {
   image: [
@@ -307,12 +313,17 @@ function toRule(kind, chain) {
   if (cv && cv.to) rule.convert = video ? { codec: cv.to } : { format: cv.to };
   const c = {};
   if (cp) {
-    if (cp.mode === 'quality') { c.minSsim = cp.ssim; if (!video) c.minQuality = 40; }
-    else if (cp.mode === 'size') { c.maxBytes = Math.round(num(cp.maxKB || 250) * 1000); if (!video) { c.quality = 90; c.minQuality = 20; } }
-    else {                                  // niveau de compression 1-100 % : 1 = quasi sans perte, 100 = poids minimal
-      const lv = Math.min(100, Math.max(1, Math.round(num(cp.level) ?? 50)));
-      if (video) c.crf = Math.round(18 + (lv - 1) * 16 / 99); else c.quality = 101 - lv;
+    // Les trois objectifs se combinent. Fidélité = plancher mesuré (prioritaire) ; niveau = compression demandée tant que
+    // la fidélité tient ; poids max = plafond, sans jamais sacrifier la fidélité.
+    const lv = Math.min(100, Math.max(1, Math.round(num(cp.level) ?? 50)));
+    if (cp.useQuality) { c.minSsim = cp.ssim; if (!video) c.minQuality = 40; }
+    if (cp.useLevel) { if (video) c.crf = Math.round(18 + (lv - 1) * 16 / 99); else c.quality = 101 - lv; }
+    if (cp.useSize) {
+      c.maxBytes = Math.round(num(cp.maxKB || 250) * 1000);
+      if (!video && !cp.useLevel && !cp.useQuality) { c.quality = 90; c.minQuality = 20; }
+      if (!video && cp.useLevel && !cp.useQuality) c.minQuality = Math.min(20, c.quality);
     }
+    if (!cp.useQuality && !cp.useLevel && !cp.useSize) { if (video) c.crf = 23; else c.quality = 90; }
     if (cp.strict) c.strict = true;
   } else if (video) c.crf = 23; else c.quality = 90;
   rule.compress = c;
@@ -368,28 +379,35 @@ function stepBody(s, kind) {
     if (FMT_HINT[s.to] && !video) body.append(el('div', { className: 'note', textContent: FMT_HINT[s.to] }));
   }
   if (s.type === 'compress') {
-    body.append(el('div', { className: 'f' }, el('label', { className: 'l', textContent: 'Priorité' }),
-      seg([['quality', 'Conserver la qualité visuelle', 'recommandé'], ['size', 'Viser un poids maximum'], ['level', 'Niveau de compression (1–100 %)']], s.mode, (v) => { s.mode = v; rerender(); })));
-    if (s.mode === 'quality') {
-      body.append(el('div', { className: 'sub-h', textContent: 'Niveau de fidélité (mesuré, pas deviné)' }),
-        seg([[0.985, 'Quasi identique', 'fichier un peu plus gros'], [0.97, 'Équilibré', 'indiscernable à l\'œil'], [0.95, 'Plus léger', 'différences minimes']], s.ssim, (v) => { s.ssim = v; rerender(); }),
-        el('div', { className: 'note', textContent: 'Le moteur mesure la ressemblance avec l\'original (SSIM) et retient le fichier le plus léger qui reste au-dessus du niveau choisi. La qualité passe toujours avant le poids.' }));
-    } else if (s.mode === 'size') {
-      body.append(el('div', { className: 'sub-h' }), el('div', { className: 'grid' }, numField('Poids maximum', s, 'maxKB', { min: 1, suffix: 'Ko' })),
-        el('div', { className: 'hint', textContent: video ? 'Le débit est calculé pour tenir dans ce poids.' : 'La qualité baisse par paliers jusqu\'à tenir sous ce poids (plancher de sécurité à 20).' }));
-    } else {
-      const lv = () => Math.min(100, Math.max(1, Math.round(Number(s.level) || 1)));
-      const box = el('input', { type: 'number', min: 1, max: 100, step: 1, value: s.level });
-      const r = el('input', { type: 'range', className: 'range', min: 1, max: 100, value: s.level });
-      box.oninput = () => { s.level = box.value === '' ? '' : Number(box.value); if (box.value !== '') r.value = lv(); };
-      box.onchange = () => { s.level = lv(); box.value = s.level; r.value = s.level; };
-      r.oninput = () => { s.level = Number(r.value); box.value = r.value; };
-      body.append(el('div', { className: 'sub-h' }), el('div', { className: 'f' }, el('label', { className: 'l', textContent: 'Niveau de compression : saisissez une valeur de 1 à 100 %' }),
-        el('div', { className: 'row' }, r, el('span', { className: 'pct' }, box, el('b', { textContent: '%' })))),
-        el('div', { className: 'hint', textContent: '1 % = quasi sans perte, fichier plus gros · 100 % = compression maximale, fichier le plus léger.' }));
-    }
+    // une option = une case + ses réglages ; au moins une reste cochée
+    const KEYS = ['useQuality', 'useLevel', 'useSize'];
+    const option = (key, title, tag, content) => {
+      const on = el('input', { type: 'checkbox', checked: s[key] });
+      on.onchange = () => { s[key] = on.checked; if (!KEYS.some((k) => s[k])) s[key] = true; rerender(); };
+      const head = el('label', { className: 'opt-h' }, on, el('b', { textContent: title }), tag ? el('span', { className: 'type', textContent: tag }) : '');
+      return el('div', { className: 'opt' + (s[key] ? ' on' : '') }, head, ...(s[key] ? [content()] : []));
+    };
+    body.append(
+      option('useQuality', 'Conserver la qualité visuelle', 'recommandé', () => el('div', {},
+        seg([[0.985, 'Quasi identique', 'fichier un peu plus gros'], [0.97, 'Équilibré', 'indiscernable à l’œil'], [0.95, 'Plus léger', 'différences minimes']], s.ssim, (v) => { s.ssim = v; rerender(); }),
+        el('div', { className: 'hint', textContent: 'Le moteur mesure la ressemblance avec l’original (SSIM) et ne descend jamais sous ce niveau.' }))),
+      option('useLevel', 'Niveau de compression (1–100 %)', '', () => {
+        const lv = () => Math.min(100, Math.max(1, Math.round(Number(s.level) || 1)));
+        const box = el('input', { type: 'number', min: 1, max: 100, step: 1, value: s.level });
+        const r = el('input', { type: 'range', className: 'range', min: 1, max: 100, value: s.level });
+        box.oninput = () => { s.level = box.value === '' ? '' : Number(box.value); if (box.value !== '') r.value = lv(); };
+        box.onchange = () => { s.level = lv(); box.value = s.level; r.value = s.level; };
+        r.oninput = () => { s.level = Number(r.value); box.value = r.value; };
+        return el('div', {}, el('div', { className: 'row' }, r, el('span', { className: 'pct' }, box, el('b', { textContent: '%' }))),
+          el('div', { className: 'hint', textContent: '1 % = quasi sans perte · 100 % = compression maximale. Saisissez la valeur voulue.' }));
+      }),
+      option('useSize', 'Viser un poids maximum', '', () => el('div', {},
+        el('div', { className: 'grid' }, numField('Poids maximum', s, 'maxKB', { min: 1, suffix: 'Ko' })),
+        el('div', { className: 'hint', textContent: video ? 'Le débit est calculé pour tenir dans ce poids.' : 'La qualité baisse par paliers pour tenir sous ce poids.' }))));
+    const combo = [s.useQuality, s.useLevel, s.useSize].filter(Boolean).length > 1;
+    if (combo) body.append(el('div', { className: 'note', textContent: 'Options combinées : la fidélité visuelle est prioritaire. Si le niveau ou le poids demandé la dégrade, le moteur compresse moins (un avertissement est consigné).' }));
     const chk = el('input', { type: 'checkbox', checked: s.strict }); chk.onchange = () => { s.strict = chk.checked; };
-    body.append(el('label', { className: 'chk' }, chk, 'Échouer si l\'objectif n\'est pas atteint'));
+    body.append(el('label', { className: 'chk' }, chk, 'Échouer si l’objectif n’est pas atteint'));
   }
   return body;
 }
@@ -397,7 +415,7 @@ function stepBody(s, kind) {
 function summary(s, kind) {
   if (s.type === 'resize') return kind === 'video' ? `Hauteur max ${s.maxHeight} px` : `Max ${s.width || '—'}${s.height ? ' × ' + s.height : ''} px`;
   if (s.type === 'convert') return ({ h264: 'MP4 (H.264)', av1: 'AV1', vp9: 'VP9', '': 'Format conservé' }[s.to] ?? s.to.toUpperCase());
-  if (s.type === 'compress') return s.mode === 'quality' ? `Fidélité ≥ ${s.ssim}` : s.mode === 'size' ? `≤ ${s.maxKB} Ko` : `Compression ${s.level} %`;
+  if (s.type === 'compress') return [s.useQuality && `Fidélité ≥ ${s.ssim}`, s.useLevel && `Compression ${s.level} %`, s.useSize && `≤ ${s.maxKB} Ko`].filter(Boolean).join(' · ');
   return '';
 }
 
